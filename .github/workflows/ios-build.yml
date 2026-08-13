@@ -11,10 +11,18 @@ on:
 jobs:
   build:
     name: Build unsigned IPA
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select latest installed Xcode
+        # Homebrew's XcodeGen generates a modern project file format; make
+        # sure we build with the newest Xcode on the runner so the format
+        # is readable (older Xcode fails with "future project file format").
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
