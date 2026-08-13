@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+
+  <defs>
+    <linearGradient id="beam" x1="300" y1="712" x2="756" y2="312"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1FB78F"/>
+      <stop offset="0.62" stop-color="#37E6C4"/>
+      <stop offset="1" stop-color="#6BF2D6"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1024"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#151A21"/>
+      <stop offset="1" stop-color="#0A0C10"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="512" cy="330" r="620"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#37E6C4" stop-opacity="0.10"/>
+      <stop offset="0.55" stop-color="#37E6C4" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#37E6C4" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#ambient)"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="225"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.055" stroke-width="6"/>
+
+  <path d="M 252 708 C 560 708, 452 316, 700 316" fill="none" stroke="#37E6C4" stroke-width="92" stroke-linecap="round" opacity="0.32" filter="url(#glow)"/><circle cx="806" cy="316" r="46" fill="#37E6C4" opacity="0.35" filter="url(#glow)"/>
+  <path d="M 252 708 C 560 708, 452 316, 700 316" fill="none" stroke="url(#beam)" stroke-width="88"
+        stroke-linecap="round"/>
+  <circle cx="806" cy="316" r="42" fill="#6BF2D6"/>
+
+</svg>

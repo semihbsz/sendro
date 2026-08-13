@@ -1,0 +1,19 @@
+# Rust
+target/
+# Node
+node_modules/
+dist/
+*.local
+# Tauri
+desktop/src-tauri/gen/
+# Xcode / iOS
+ios/Sendro.xcodeproj/
+ios/build/
+*.ipa
+DerivedData/
+xcuserdata/
+# OS
+.DS_Store
+Thumbs.db
+# Env
+.env

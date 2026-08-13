@@ -1,0 +1,58 @@
+# XcodeGen project spec for the Sendro iOS app.
+# Generated in CI (GitHub Actions, macOS runner) via `xcodegen generate`.
+name: Sendro
+
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    # Swift *language mode* (not toolchain version) — 5.0 is correct for
+    # the Swift 5.9+ compiler on the CI runner.
+    SWIFT_VERSION: "5.0"
+    # URLSession delegates & Combine sinks are used from non-main queues on
+    # purpose; keep concurrency checking minimal to match Swift 5 semantics.
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+targets:
+  Sendro:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sendro
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        # NOTE: sideloaders (Sideloadly / AltStore) usually rewrite the bundle
+        # id to match their free provisioning profile — change freely.
+        PRODUCT_BUNDLE_IDENTIFIER: com.sendro.ios
+        PRODUCT_NAME: Sendro
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sendro/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        ENABLE_BITCODE: NO
+        CODE_SIGN_STYLE: Automatic
+
+schemes:
+  Sendro:
+    build:
+      targets:
+        Sendro: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

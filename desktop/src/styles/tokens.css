@@ -1,0 +1,71 @@
+/* Sendro design tokens — dark, premium, restrained. */
+
+:root {
+  /* Surfaces */
+  --bg-base: #0b0d10;
+  --bg-panel: #12151a;
+  --bg-raised: #1a1e24;
+  --bg-hover: rgba(255, 255, 255, 0.04);
+  --bg-active: rgba(255, 255, 255, 0.07);
+
+  /* The Sendro beam */
+  --accent: #37e6c4;
+  --accent-strong: #2bd4b4;
+  --accent-dim: rgba(55, 230, 196, 0.12);
+  --accent-border: rgba(55, 230, 196, 0.35);
+  --accent-glow: 0 0 20px rgba(55, 230, 196, 0.22);
+  --accent-text-on: #06251e;
+
+  /* Text */
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0a8;
+  --text-tertiary: #626870;
+
+  /* Semantic */
+  --danger: #f26d6d;
+  --danger-dim: rgba(242, 109, 109, 0.12);
+  --warn: #e8c268;
+  --warn-dim: rgba(232, 194, 104, 0.12);
+  --ok: #37e6c4;
+
+  /* Lines */
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  /* Shape */
+  --radius-sm: 8px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  /* Spacing grid (8px) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  /* Type */
+  --font-sans:
+    "Inter", "Inter Variable", -apple-system, "Segoe UI Variable",
+    "Segoe UI", system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-base: 13.5px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 24px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-fast: 150ms var(--ease);
+
+  /* Shadows */
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-modal:
+    0 0 0 1px rgba(255, 255, 255, 0.06), 0 24px 64px rgba(0, 0, 0, 0.6);
+}
