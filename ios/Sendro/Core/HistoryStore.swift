@@ -19,6 +19,9 @@ struct HistoryEntry: Codable, Identifiable {
     let outcome: String
     let savedTo: String?        // photos | files | temp
     let errorMessage: String?
+    /// nil (legacy / incoming) | "outgoing" (iPhone → PC upload, §7).
+    /// Optional so entries persisted before this field existed still decode.
+    let direction: String?
 }
 
 final class HistoryStore: ObservableObject {
@@ -37,7 +40,8 @@ final class HistoryStore: ObservableObject {
              senderName: String,
              outcome: String,
              savedTo: String? = nil,
-             errorMessage: String? = nil) {
+             errorMessage: String? = nil,
+             direction: String? = nil) {
         let entry = HistoryEntry(id: UUID().uuidString,
                                  transferId: transferId,
                                  fileName: fileName,
@@ -46,7 +50,8 @@ final class HistoryStore: ObservableObject {
                                  dateMs: Int64(Date().timeIntervalSince1970 * 1000),
                                  outcome: outcome,
                                  savedTo: savedTo,
-                                 errorMessage: errorMessage)
+                                 errorMessage: errorMessage,
+                                 direction: direction)
         entries.insert(entry, at: 0)
         if entries.count > Self.maxEntries {
             entries = Array(entries.prefix(Self.maxEntries))

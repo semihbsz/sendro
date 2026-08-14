@@ -16,6 +16,7 @@ struct SendroApp: App {
     @StateObject private var fileStore: FileStore
     @StateObject private var discovery: DiscoveryService
     @StateObject private var engine: TransferEngine
+    @StateObject private var uploader: UploadEngine
 
     init() {
         let settings = Settings()
@@ -28,12 +29,14 @@ struct SendroApp: App {
                                     history: history,
                                     fileStore: fileStore,
                                     discovery: discovery)
+        let uploader = UploadEngine(paired: pairedHosts, history: history)
         _settings = StateObject(wrappedValue: settings)
         _pairedHosts = StateObject(wrappedValue: pairedHosts)
         _history = StateObject(wrappedValue: history)
         _fileStore = StateObject(wrappedValue: fileStore)
         _discovery = StateObject(wrappedValue: discovery)
         _engine = StateObject(wrappedValue: engine)
+        _uploader = StateObject(wrappedValue: uploader)
     }
 
     var body: some Scene {
@@ -45,6 +48,7 @@ struct SendroApp: App {
                 .environmentObject(fileStore)
                 .environmentObject(discovery)
                 .environmentObject(engine)
+                .environmentObject(uploader)
         }
     }
 }

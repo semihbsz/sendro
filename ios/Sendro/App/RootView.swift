@@ -33,6 +33,7 @@ struct RootView: View {
     @State private var tab: Tab = .receive
     @State private var showDevices = false
     @State private var showSettings = false
+    @State private var showSend = false
     @State private var flight: FlightRef?
 
     var body: some View {
@@ -44,6 +45,7 @@ struct RootView: View {
                 case .receive:
                     HomeView(openDevices: { showDevices = true },
                              openSettings: { showSettings = true },
+                             openSend: { showSend = true },
                              openFlight: { ref in flight = ref },
                              goLibrary: { withAnimation(.easeOut(duration: 0.2)) { tab = .library } })
                 case .library:
@@ -65,6 +67,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showSend) {
+            SendSheet()
         }
         .fullScreenCover(item: $flight) { ref in
             FlightView(flightRef: ref)

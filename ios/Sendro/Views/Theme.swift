@@ -53,20 +53,27 @@ enum Theme {
 // MARK: - Canvas background
 
 /// Near-black canvas with the radial iris glow bleeding in from above.
+///
+/// LAYOUT NOTE: the 520pt glow disc must NOT be a layout child — a fixed
+/// 520pt-wide sibling inflates the parent ZStack's union size past any
+/// iPhone width (393pt) and the whole UI gets centered + clipped on both
+/// edges. It lives in an .overlay (which never affects layout) and is
+/// clipped, so this view always reports exactly the proposed size.
 struct SendroBackground: View {
     var body: some View {
-        ZStack(alignment: .top) {
-            Theme.bg
-            RadialGradient(colors: [Theme.iris.opacity(0.22),
-                                    Theme.iris.opacity(0.06),
-                                    .clear],
-                           center: .center,
-                           startRadius: 0,
-                           endRadius: 260)
-                .frame(width: 520, height: 520)
-                .offset(y: -220)
-        }
-        .ignoresSafeArea()
+        Theme.bg
+            .ignoresSafeArea()
+            .overlay(alignment: .top) {
+                RadialGradient(colors: [Theme.iris.opacity(0.22),
+                                        Theme.iris.opacity(0.06),
+                                        .clear],
+                               center: .center,
+                               startRadius: 0,
+                               endRadius: 260)
+                    .frame(width: 520, height: 520)
+                    .offset(y: -220)
+                    .allowsHitTesting(false)
+            }
     }
 }
 
@@ -150,6 +157,9 @@ struct AccentPillLabel: View {
         Text(title)
             .font(Theme.sans(15.5, .semibold))
             .foregroundColor(Theme.onAccent)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .frame(height: height)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(color))
@@ -167,6 +177,9 @@ struct GhostPillLabel: View {
         Text(title)
             .font(Theme.sans(15.5, .medium))
             .foregroundColor(textColor)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .frame(height: height)
             .glassRow(cornerRadius: 16, fillOpacity: 0.07, borderOpacity: 0.1)

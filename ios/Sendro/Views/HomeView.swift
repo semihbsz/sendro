@@ -20,6 +20,7 @@ struct HomeView: View {
 
     let openDevices: () -> Void
     let openSettings: () -> Void
+    let openSend: () -> Void
     let openFlight: (FlightRef) -> Void
     let goLibrary: () -> Void
 
@@ -43,6 +44,9 @@ struct HomeView: View {
                         listeningSection
                             .padding(.top, 30)
                     }
+
+                    sendRow
+                        .padding(.top, 26)
 
                     if !engine.active.isEmpty {
                         activeSection
@@ -247,6 +251,51 @@ struct HomeView: View {
         return "\(host.name) looks offline right now. Open Sendro on your PC on this Wi-Fi and it will reconnect by itself."
     }
 
+    // MARK: Send to PC
+
+    /// Entry point for the reverse direction (§7 upload). Enabled only when
+    /// a paired PC is online; otherwise shows why it's disabled.
+    private var sendRow: some View {
+        let online = engine.hostOnline.values.contains(true)
+        return Button(action: openSend) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(online ? Theme.iris.opacity(0.16) : Color.white.opacity(0.05))
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(online ? Theme.irisSoft : Theme.textBase.opacity(0.35))
+                }
+                .frame(width: 38, height: 38)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Send to PC")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundColor(online ? Theme.textPrimary : Theme.textBase.opacity(0.5))
+                    Text(online
+                         ? "Photos, videos or files — original bytes, verified."
+                         : "No PC online — open Sendro on your computer.")
+                        .font(Theme.mono(10.5))
+                        .foregroundColor(Theme.textTertiary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.textBase.opacity(online ? 0.5 : 0.25))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .glassRow(cornerRadius: 18,
+                      fillOpacity: online ? 0.06 : 0.035,
+                      borderOpacity: online ? 0.1 : 0.06)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableButtonStyle())
+        .disabled(!online)
+    }
+
     // MARK: Active transfers
 
     private var activeSection: some View {
@@ -394,7 +443,7 @@ struct HomeView: View {
     private func outcomeMark(_ entry: HistoryEntry) -> some View {
         switch entry.outcome {
         case "completed":
-            Image(systemName: "checkmark")
+            Image(systemName: entry.direction == "outgoing" ? "arrow.up" : "checkmark")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(Theme.teal)
         case "failed":

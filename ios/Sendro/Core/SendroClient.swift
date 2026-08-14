@@ -150,6 +150,50 @@ struct SendroClient {
         return request
     }
 
+    /// Build the POST request for the §7 reverse upload (iPhone → PC).
+    /// Raw body — NOT multipart; the caller attaches the file bytes via
+    /// URLSession.uploadTask(with:fromFile:), which streams from disk.
+    func makeUploadRequest(fileName: String, sha256Hex: String, contentLength: Int64) -> URLRequest {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/upload"))
+        request.httpMethod = "POST"
+        applyAuth(&request)
+        request.setValue("UTF-8''" + Self.rfc5987Encode(fileName),
+                         forHTTPHeaderField: "X-Sendro-File-Name")
+        request.setValue(sha256Hex.lowercased(), forHTTPHeaderField: "X-Sendro-Sha256")
+        // URLSession also derives Content-Length from the upload file; set it
+        // explicitly so the header is present even before the body streams.
+        request.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60        // idle timeout between sent chunks
+        return request
+    }
+
+    /// RFC 5987 value-chars encoding of a UTF-8 string. attr-chars stay
+    /// literal — ALPHA / DIGIT and !#$&+-.^_`|~ — every other byte becomes
+    /// %XX (uppercase hex) of its UTF-8 encoding. Note: this is deliberately
+    /// NOT CharacterSet.alphanumerics (which admits non-ASCII letters).
+    static func rfc5987Encode(_ value: String) -> String {
+        var out = String()
+        out.reserveCapacity(value.utf8.count)
+        for byte in value.utf8 {
+            if Self.rfc5987AttrChars.contains(byte) {
+                out.append(Character(UnicodeScalar(byte)))
+            } else {
+                out += String(format: "%%%02X", Int(byte))
+            }
+        }
+        return out
+    }
+
+    private static let rfc5987AttrChars: Set<UInt8> = {
+        var set = Set<UInt8>()
+        set.formUnion(UInt8(ascii: "a")...UInt8(ascii: "z"))
+        set.formUnion(UInt8(ascii: "A")...UInt8(ascii: "Z"))
+        set.formUnion(UInt8(ascii: "0")...UInt8(ascii: "9"))
+        set.formUnion("!#$&+-.^_`|~".utf8)
+        return set
+    }()
+
     // MARK: - Plumbing
 
     private func applyAuth(_ request: inout URLRequest) {

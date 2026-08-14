@@ -189,6 +189,8 @@ struct LibraryView: View {
     @ViewBuilder
     private func outcomeChip(_ entry: HistoryEntry) -> some View {
         switch entry.outcome {
+        case "completed" where entry.direction == "outgoing":
+            chip(text: "Sent", color: Theme.teal, systemImage: "arrow.up")
         case "completed":
             chip(text: entry.savedTo == "photos" ? "Photos" : "Files",
                  color: Theme.teal, systemImage: "checkmark")

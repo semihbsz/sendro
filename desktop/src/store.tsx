@@ -301,6 +301,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       else unlisteners.push(un);
     });
 
+    // Presence: the iPhone long-polls the core every ~25 s, which bumps its
+    // lastSeenMs — but only in the core's memory. Re-fetch the trusted list
+    // every 10 s so the online indicator tracks reality instead of the
+    // mount-time snapshot.
+    const presenceTimer = window.setInterval(() => {
+      api
+        .trustedDevices()
+        .then((devices) => dispatch({ type: "set-devices", devices }))
+        .catch(() => undefined);
+    }, 10_000);
+    unlisteners.push(() => window.clearInterval(presenceTimer));
+
     // Tray → webview notifications.
     listen<{ paused: boolean }>("sendro://paused", (event) => {
       dispatch({ type: "set-paused", paused: event.payload.paused });
