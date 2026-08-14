@@ -2,7 +2,8 @@
 //  SettingsView.swift
 //  Sendro
 //
-//  App settings + Network Diagnostics + About.
+//  Settings sheet in the new glass language + Network Diagnostics + About.
+//  Binds the exact same Settings.Keys the engine reads.
 //
 
 import SwiftUI
@@ -11,6 +12,8 @@ import UIKit
 import Combine
 
 struct SettingsView: View {
+
+    @Environment(\.dismiss) private var dismiss
 
     @AppStorage(Settings.Keys.deviceName)
     private var deviceName: String = UIDevice.current.name
@@ -29,56 +32,190 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("Device name", text: $deviceName)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("This iPhone")
-                } footer: {
-                    Text("Shown on your PC when pairing and transferring.")
-                }
+            ZStack {
+                Theme.bg.ignoresSafeArea()
 
-                Section {
-                    Toggle("Auto-Accept From Trusted Devices", isOn: $autoAcceptFromTrusted)
-                } footer: {
-                    Text("Only applies to offers your PC flags as auto-send (watch-folder rules). Everything else always asks.")
-                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 26) {
+                        section(tag: "This iPhone") {
+                            settingCard {
+                                TextField("", text: $deviceName, prompt: Text("Device name")
+                                    .foregroundColor(Theme.textBase.opacity(0.35)))
+                                    .font(Theme.sans(15, .medium))
+                                    .foregroundColor(Theme.textPrimary)
+                                    .autocorrectionDisabled()
+                            }
+                            caption("Shown on your PC when pairing and transferring.")
+                        }
 
-                Section {
-                    Picker("Save Media to Photos", selection: $saveMediaToPhotos) {
-                        ForEach(Settings.SaveMediaMode.allCases) { mode in
-                            Text(mode.label).tag(mode)
+                        section(tag: "Transfers") {
+                            settingCard {
+                                Toggle(isOn: $autoAcceptFromTrusted) {
+                                    Text("Auto-Accept From Trusted Devices")
+                                        .font(Theme.sans(15))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                                .tint(Theme.iris)
+                            }
+                            caption("Only applies to offers your PC flags as auto-send (watch-folder rules). Everything else always asks.")
+                        }
+
+                        section(tag: "Photos & Videos") {
+                            settingCard {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    Text("Save Media to Photos")
+                                        .font(Theme.sans(15))
+                                        .foregroundColor(Theme.textPrimary)
+                                    mediaModePicker
+                                }
+                            }
+                            settingCard {
+                                VStack(spacing: 16) {
+                                    Toggle(isOn: $addToSendroAlbum) {
+                                        Text("Add to “Sendro” Album")
+                                            .font(Theme.sans(15))
+                                            .foregroundColor(Theme.textPrimary)
+                                    }
+                                    .tint(Theme.iris)
+
+                                    Divider()
+                                        .overlay(Color.white.opacity(0.08))
+
+                                    Toggle(isOn: $deleteTempAfterImport) {
+                                        Text("Delete Temp After Import")
+                                            .font(Theme.sans(15))
+                                            .foregroundColor(Theme.textPrimary)
+                                    }
+                                    .tint(Theme.iris)
+                                }
+                            }
+                            caption("With “Delete Temp After Import” off, a copy of imported media is also kept in Files. Non-media files always go to Files.")
+                        }
+
+                        section(tag: "Network") {
+                            NavigationLink {
+                                NetworkDiagnosticsView()
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "stethoscope")
+                                        .font(.system(size: 15, weight: .medium))
+                                        .foregroundColor(Theme.irisSoft)
+                                    Text("Network Diagnostics")
+                                        .font(Theme.sans(15))
+                                        .foregroundColor(Theme.textPrimary)
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(Theme.textBase.opacity(0.35))
+                                }
+                                .padding(16)
+                                .glassRow(cornerRadius: 20, fillOpacity: 0.05, borderOpacity: 0.09)
+                            }
+                            .buttonStyle(PressableButtonStyle())
+                        }
+
+                        section(tag: "About") {
+                            settingCard {
+                                VStack(spacing: 14) {
+                                    aboutRow(label: "Version", value: Self.appVersion)
+                                    Divider().overlay(Color.white.opacity(0.08))
+                                    aboutRow(label: "Protocol", value: "v\(sendroProtocolVersion)")
+                                }
+                            }
+                            caption("Sendro moves files from your PC to this iPhone over your own Wi-Fi — byte for byte, verified with SHA-256. No cloud, no internet, no size limits.")
                         }
                     }
-                    Toggle("Add to “Sendro” Album", isOn: $addToSendroAlbum)
-                    Toggle("Delete Temp After Import", isOn: $deleteTempAfterImport)
-                } header: {
-                    Text("Photos & Videos")
-                } footer: {
-                    Text("With “Delete Temp After Import” off, a copy of imported media is also kept in Files. Non-media files always go to Files.")
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, 40)
                 }
-
-                Section("Network") {
-                    NavigationLink {
-                        NetworkDiagnosticsView()
-                    } label: {
-                        Label("Network Diagnostics", systemImage: "stethoscope")
-                    }
-                }
-
-                Section("About") {
-                    LabeledContent("Version", value: Self.appVersion)
-                    LabeledContent("Protocol", value: "v\(sendroProtocolVersion)")
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Sendro moves files from your PC to this iPhone over your own Wi-Fi — byte for byte, verified with SHA-256. No cloud, no internet, no size limits.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 2)
-                }
+                .scrollIndicators(.hidden)
             }
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .tint(Theme.irisSoft)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: Pieces
+
+    private func section<Content: View>(tag: String,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionTag(text: tag)
+                .padding(.leading, 4)
+            content()
+        }
+    }
+
+    private func settingCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .glassRow(cornerRadius: 20, fillOpacity: 0.05, borderOpacity: 0.09)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.sans(12))
+            .foregroundColor(Theme.textFaint)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 4)
+    }
+
+    private var mediaModePicker: some View {
+        HStack(spacing: 6) {
+            ForEach(Settings.SaveMediaMode.allCases) { mode in
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) { saveMediaToPhotos = mode }
+                } label: {
+                    Text(mode.label)
+                        .font(Theme.sans(12, saveMediaToPhotos == mode ? .semibold : .medium))
+                        .foregroundColor(saveMediaToPhotos == mode
+                                         ? Theme.textBase
+                                         : Theme.textBase.opacity(0.45))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 30)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(saveMediaToPhotos == mode
+                                      ? Color.white.opacity(0.11)
+                                      : Color.clear)
+                        )
+                }
+                .buttonStyle(PressableButtonStyle())
+            }
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5)
+        )
+    }
+
+    private func aboutRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(Theme.sans(15))
+                .foregroundColor(Theme.textPrimary)
+            Spacer()
+            Text(value)
+                .font(Theme.mono(13))
+                .foregroundColor(Theme.textSecondary)
         }
     }
 
@@ -133,97 +270,201 @@ struct NetworkDiagnosticsView: View {
     @State private var testing = false
 
     var body: some View {
-        List {
-            Section("Wi-Fi") {
-                HStack {
-                    Image(systemName: pathMonitor.isWifi ? "wifi" : "wifi.slash")
-                        .foregroundColor(pathMonitor.isConnected && pathMonitor.isWifi ? .green : .orange)
-                    Text(pathMonitor.statusText)
-                }
-                if pathMonitor.isConnected && !pathMonitor.isWifi {
-                    Text("Sendro needs your iPhone and PC on the same Wi-Fi network.")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
-            }
+        ZStack {
+            Theme.bg.ignoresSafeArea()
 
-            Section("Local Network Permission") {
-                switch discovery.status {
-                case .permissionDenied:
-                    Label("Denied — discovery is blocked", systemImage: "xmark.circle.fill")
-                        .foregroundColor(.red)
-                    Button("Open Settings") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 26) {
+                    diagSection(tag: "Wi-Fi") {
+                        diagCard {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: pathMonitor.isWifi ? "wifi" : "wifi.slash")
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(pathMonitor.isConnected && pathMonitor.isWifi
+                                                         ? Theme.teal : Theme.warn)
+                                    Text(pathMonitor.statusText)
+                                        .font(Theme.sans(14.5))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                                if pathMonitor.isConnected && !pathMonitor.isWifi {
+                                    Text("Sendro needs your iPhone and PC on the same Wi-Fi network.")
+                                        .font(Theme.sans(12.5))
+                                        .foregroundColor(Theme.warn)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                         }
                     }
-                case .browsing:
-                    Label("Granted — browsing for _sendro._tcp", systemImage: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                case .failed(let message):
-                    Label("Browser error: \(message)", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                case .idle:
-                    Label("Discovery idle", systemImage: "pause.circle")
-                        .foregroundColor(.secondary)
-                }
-                Button("Restart Discovery") {
-                    discovery.restart()
-                }
-            }
 
-            Section("Storage") {
-                LabeledContent("Free space",
-                               value: TransferEngine.freeDiskSpace().map { ByteFormat.string($0) } ?? "Unknown")
-            }
+                    diagSection(tag: "Local Network Permission") {
+                        diagCard {
+                            VStack(alignment: .leading, spacing: 14) {
+                                permissionStatus
 
-            Section {
-                if pairedHosts.hosts.isEmpty {
-                    Text("No paired computers yet.")
-                        .foregroundColor(.secondary)
-                }
-                ForEach(pairedHosts.hosts) { host in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(host.name)
-                                .font(.body.weight(.medium))
-                            Spacer()
-                            Circle()
-                                .fill((engine.hostOnline[host.deviceId] ?? false) ? Color.green : Color.gray.opacity(0.5))
-                                .frame(width: 10, height: 10)
-                        }
-                        Text("\(host.lastHost):\(String(host.lastPort))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        if let result = pingResults[host.deviceId] {
-                            Text(result)
-                                .font(.caption)
-                                .foregroundColor(result.hasPrefix("OK") ? .green : .red)
+                                if discovery.status == .permissionDenied {
+                                    Button {
+                                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                                            UIApplication.shared.open(url)
+                                        }
+                                    } label: {
+                                        Text("Open Settings")
+                                            .font(Theme.sans(13, .semibold))
+                                            .foregroundColor(Theme.onAccent)
+                                            .padding(.horizontal, 16)
+                                            .frame(height: 34)
+                                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                .fill(Theme.warn))
+                                    }
+                                    .buttonStyle(PressableButtonStyle())
+                                }
+
+                                Button {
+                                    discovery.restart()
+                                } label: {
+                                    Text("Restart Discovery")
+                                        .font(Theme.sans(13, .medium))
+                                        .foregroundColor(Theme.irisSoft)
+                                }
+                                .buttonStyle(PressableButtonStyle())
+                            }
                         }
                     }
-                    .padding(.vertical, 2)
-                }
-                if !pairedHosts.hosts.isEmpty {
-                    Button {
-                        Task { await runPings() }
-                    } label: {
-                        if testing {
+
+                    diagSection(tag: "Storage") {
+                        diagCard {
                             HStack {
-                                ProgressView()
-                                Text("Testing…")
+                                Text("Free space")
+                                    .font(Theme.sans(14.5))
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                Text(TransferEngine.freeDiskSpace().map { ByteFormat.string($0) } ?? "Unknown")
+                                    .font(Theme.mono(13))
+                                    .foregroundColor(Theme.textSecondary)
+                            }
+                        }
+                    }
+
+                    diagSection(tag: "Paired Computers") {
+                        if pairedHosts.hosts.isEmpty {
+                            diagCard {
+                                Text("No paired computers yet.")
+                                    .font(Theme.sans(13.5))
+                                    .foregroundColor(Theme.textSecondary)
                             }
                         } else {
-                            Text("Test Connections")
+                            VStack(spacing: 9) {
+                                ForEach(pairedHosts.hosts) { host in
+                                    hostCard(host)
+                                }
+
+                                Button {
+                                    Task { await runPings() }
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        if testing {
+                                            ProgressView()
+                                                .tint(Theme.irisSoft)
+                                            Text("Testing…")
+                                        } else {
+                                            Text("Test Connections")
+                                        }
+                                    }
+                                    .font(Theme.sans(14, .medium))
+                                    .foregroundColor(Theme.irisSoft)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 46)
+                                    .glassRow(cornerRadius: 16, fillOpacity: 0.05, borderOpacity: 0.09)
+                                }
+                                .buttonStyle(PressableButtonStyle())
+                                .disabled(testing)
+                            }
                         }
                     }
-                    .disabled(testing)
                 }
-            } header: {
-                Text("Paired Computers")
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 40)
             }
+            .scrollIndicators(.hidden)
         }
         .navigationTitle("Network Diagnostics")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var permissionStatus: some View {
+        switch discovery.status {
+        case .permissionDenied:
+            statusLine(text: "Denied — discovery is blocked",
+                       systemImage: "xmark.circle.fill", color: Theme.danger)
+        case .browsing:
+            statusLine(text: "Granted — browsing for _sendro._tcp",
+                       systemImage: "checkmark.circle.fill", color: Theme.teal)
+        case .failed(let message):
+            statusLine(text: "Browser error: \(message)",
+                       systemImage: "exclamationmark.triangle.fill", color: Theme.warn)
+        case .idle:
+            statusLine(text: "Discovery idle",
+                       systemImage: "pause.circle", color: Theme.textSecondary)
+        }
+    }
+
+    private func statusLine(text: String, systemImage: String, color: Color) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(color)
+            Text(text)
+                .font(Theme.sans(14))
+                .foregroundColor(Theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func hostCard(_ host: PairedHost) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(host.name)
+                    .font(Theme.sans(15, .medium))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+                Circle()
+                    .fill((engine.hostOnline[host.deviceId] ?? false)
+                          ? Theme.teal : Theme.textBase.opacity(0.3))
+                    .frame(width: 9, height: 9)
+            }
+            Text("\(host.lastHost):\(String(host.lastPort))")
+                .font(Theme.mono(11))
+                .foregroundColor(Theme.textTertiary)
+            if let result = pingResults[host.deviceId] {
+                Text(result)
+                    .font(Theme.mono(11))
+                    .foregroundColor(result.hasPrefix("OK") ? Theme.teal : Theme.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .glassRow(cornerRadius: 20, fillOpacity: 0.05, borderOpacity: 0.09)
+    }
+
+    private func diagSection<Content: View>(tag: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionTag(text: tag)
+                .padding(.leading, 4)
+            content()
+        }
+    }
+
+    private func diagCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .glassRow(cornerRadius: 20, fillOpacity: 0.05, borderOpacity: 0.09)
     }
 
     @MainActor

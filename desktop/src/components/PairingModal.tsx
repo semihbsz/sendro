@@ -1,8 +1,8 @@
 import { Modal } from "./Modal";
 import { useAppDispatch, useAppState } from "../store";
 
-/** Shown when a PairingStarted core event arrives; auto-dismissed by the
- *  store on PairingCompleted / PairingFailed. */
+/** Shown app-wide when a PairingStarted core event arrives; auto-dismissed
+ *  by the store on PairingCompleted / PairingFailed. */
 export function PairingModal() {
   const { pairing } = useAppState();
   const dispatch = useAppDispatch();
@@ -24,8 +24,8 @@ export function PairingModal() {
             </span>
           ))}
         </div>
-        <div className="pairing-device">
-          The code expires in about two minutes. Nothing leaves your network.
+        <div className="pairing-foot">
+          expires in ~2 minutes · nothing leaves your network
         </div>
       </div>
     </Modal>

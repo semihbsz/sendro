@@ -3,9 +3,98 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
-import { IconFolder } from "../icons";
+import { formatDate, formatRelative, isOnline } from "../format";
+import { IconPhone, IconWifi } from "../icons";
 import { Toggle } from "../components/common";
 import type { Settings } from "../types";
+
+/** Trusted devices — folded into Settings in the new IA (the rail has no
+ *  Devices tab; the gear is where trust is managed). */
+function DevicesSection() {
+  const { devices } = useAppState();
+  const dispatch = useAppDispatch();
+
+  const revoke = async (deviceId: string) => {
+    try {
+      await api.revokeDevice(deviceId);
+      const next = await api.trustedDevices();
+      dispatch({ type: "set-devices", devices: next });
+    } catch (err) {
+      console.error("revoke failed", err);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <span className="strip-label">Devices</span>
+      <div className="settings-panel">
+        {devices.length === 0 ? (
+          <div className="device-row">
+            <div className="device-row-icon">
+              <IconPhone size={17} />
+            </div>
+            <div className="device-row-main">
+              <div className="device-row-name">No devices paired yet</div>
+              <div className="device-row-sub">
+                pair below — the 6-digit code appears on this screen
+              </div>
+            </div>
+          </div>
+        ) : (
+          devices.map((d) => {
+            const online = isOnline(d.lastSeenMs);
+            return (
+              <div className="device-row" key={d.deviceId}>
+                <div className="device-row-icon">
+                  <IconPhone size={17} />
+                </div>
+                <div className="device-row-main">
+                  <div className="device-row-name">{d.deviceName}</div>
+                  <div className="device-row-sub">
+                    {d.platform === "ios" ? "iOS" : d.platform} · paired{" "}
+                    {formatDate(d.pairedAtMs)} ·{" "}
+                    {online
+                      ? "online now"
+                      : `last seen ${formatRelative(d.lastSeenMs)}`}
+                  </div>
+                </div>
+                <span className={`online-pill${online ? "" : " off"}`}>
+                  <span
+                    className={`pulse-dot${online ? "" : " off"}`}
+                    style={{ width: 6, height: 6 }}
+                  />
+                  {online ? "online" : "offline"}
+                </span>
+                <button
+                  className="btn-revoke"
+                  onClick={() => void revoke(d.deviceId)}
+                  title="Revoke trust — this device will need to pair again"
+                >
+                  Revoke
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="pair-hint">
+        <IconWifi size={17} />
+        <div>
+          <div className="pair-hint-title">How to pair</div>
+          <div className="pair-hint-body">
+            Make sure both devices are on the same Wi-Fi network, then:
+            <ol>
+              <li>Open Sendro on your iPhone.</li>
+              <li>Tap this PC when it appears under nearby devices.</li>
+              <li>Type the 6-digit code that pops up on this screen.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsView() {
   const { settings, info } = useAppState();
@@ -28,8 +117,8 @@ export function SettingsView() {
 
   if (!draft) {
     return (
-      <div className="view">
-        <div className="view-title">Settings</div>
+      <div className="page" key="settings">
+        <div className="page-title">Settings</div>
       </div>
     );
   }
@@ -74,41 +163,31 @@ export function SettingsView() {
   };
 
   return (
-    <div className="view">
-      <div className="view-header">
-        <div>
-          <div className="view-title">Settings</div>
-          <div className="view-subtitle">
-            Changes to name or port apply after the next restart of the local
-            server.
+    <div className="page" key="settings">
+      <div className="page-head">
+        <div className="page-head-text">
+          <div className="page-title">Settings</div>
+          <div className="page-sub">
+            name & port changes apply after the local server restarts
           </div>
         </div>
-        <div className="view-actions">
-          {savedTick && !dirty ? (
-            <span className="chip chip-accent">Saved</span>
-          ) : null}
-          <button
-            className="btn btn-primary"
-            disabled={!dirty || saving}
-            onClick={() => void save()}
-          >
-            {saving ? "Saving…" : "Save Changes"}
-          </button>
-        </div>
+        {savedTick && !dirty ? <span className="save-note">saved</span> : null}
+        <button
+          className="btn-solid"
+          disabled={!dirty || saving}
+          onClick={() => void save()}
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
       </div>
 
-      {error ? (
-        <div
-          className="panel panel-pad"
-          style={{ color: "var(--danger)", fontSize: "var(--fs-sm)" }}
-        >
-          {error}
-        </div>
-      ) : null}
+      {error ? <div className="error-note">{error}</div> : null}
 
-      <span className="section-label">General</span>
-      <div className="panel" style={{ marginTop: "calc(-1 * var(--s-3))" }}>
-        <div className="list">
+      <DevicesSection />
+
+      <div className="settings-section">
+        <span className="strip-label">General</span>
+        <div className="settings-panel">
           <div className="settings-row">
             <div>
               <div className="field-label">Device name</div>
@@ -133,12 +212,15 @@ export function SettingsView() {
               <div className="field-hint mono">{draft.receiveDir}</div>
             </div>
             <div className="settings-control">
-              <button className="btn" onClick={() => void changeReceiveDir()}>
-                <IconFolder size={14} />
+              <button
+                className="btn-glass btn-sm"
+                onClick={() => void changeReceiveDir()}
+              >
                 Change…
               </button>
               <button
-                className="btn btn-ghost"
+                className="btn-ghost-text"
+                style={{ padding: "10px 12px" }}
                 onClick={() => void api.openReceiveFolder()}
               >
                 Open
@@ -148,9 +230,9 @@ export function SettingsView() {
         </div>
       </div>
 
-      <span className="section-label">Transfer</span>
-      <div className="panel" style={{ marginTop: "calc(-1 * var(--s-3))" }}>
-        <div className="list">
+      <div className="settings-section">
+        <span className="strip-label">Transfer</span>
+        <div className="settings-panel">
           <div className="settings-row">
             <div>
               <div className="field-label">Port</div>
@@ -199,9 +281,9 @@ export function SettingsView() {
         </div>
       </div>
 
-      <span className="section-label">Windows</span>
-      <div className="panel" style={{ marginTop: "calc(-1 * var(--s-3))" }}>
-        <div className="list">
+      <div className="settings-section">
+        <span className="strip-label">Windows</span>
+        <div className="settings-panel">
           <div className="settings-row">
             <div>
               <div className="field-label">Launch on startup</div>
@@ -232,36 +314,35 @@ export function SettingsView() {
         </div>
       </div>
 
-      <span className="section-label">About</span>
-      <div
-        className="panel panel-pad"
-        style={{ marginTop: "calc(-1 * var(--s-3))" }}
-      >
-        <div className="about-line">
-          <span>Sendro for Windows</span>
-          <span className="mono">{version ? `v${version}` : "—"}</span>
-        </div>
-        <div className="about-line">
-          <span>Local address</span>
-          <span className="mono">
-            {info
-              ? info.localIps.length > 0
-                ? info.localIps
-                    .map((ip) => `${ip}:${info.apiPort}`)
-                    .join("  ·  ")
-                : `port ${info.apiPort}`
-              : "—"}
-          </span>
-        </div>
-        <div className="about-line">
-          <span>Protocol</span>
-          <span className="mono">v{info?.protocolVersion ?? "—"}</span>
-        </div>
-        <div className="about-line">
-          <span style={{ color: "var(--text-tertiary)" }}>
-            Local-only. Private by design.
-          </span>
-          <span />
+      <div className="settings-section">
+        <span className="strip-label">About</span>
+        <div className="settings-panel">
+          <div className="about-line">
+            <span>Sendro for Windows</span>
+            <span className="mono">{version ? `v${version}` : "—"}</span>
+          </div>
+          <div className="about-line">
+            <span>Local address</span>
+            <span className="mono">
+              {info
+                ? info.localIps.length > 0
+                  ? info.localIps
+                      .map((ip) => `${ip}:${info.apiPort}`)
+                      .join("  ·  ")
+                  : `port ${info.apiPort}`
+                : "—"}
+            </span>
+          </div>
+          <div className="about-line">
+            <span>Protocol</span>
+            <span className="mono">v{info?.protocolVersion ?? "—"}</span>
+          </div>
+          <div className="about-line">
+            <span style={{ color: "var(--text-tertiary)" }}>
+              Local-only. Private by design.
+            </span>
+            <span />
+          </div>
         </div>
       </div>
     </div>

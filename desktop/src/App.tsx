@@ -4,14 +4,14 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "./store";
 import { IconDrop } from "./icons";
-import { Sidebar } from "./components/Sidebar";
+import { Titlebar } from "./components/Titlebar";
+import { Rail } from "./components/Rail";
+import { TopBar } from "./components/TopBar";
 import { PairingModal } from "./components/PairingModal";
 import { DevicePicker } from "./components/DevicePicker";
-import { Home } from "./views/Home";
-import { Devices } from "./views/Devices";
-import { Queue } from "./views/Queue";
-import { History } from "./views/History";
-import { WatchFolders } from "./views/WatchFolders";
+import { Send } from "./views/Send";
+import { Flow } from "./views/Flow";
+import { Watch } from "./views/Watch";
 import { SettingsView } from "./views/SettingsView";
 
 export default function App() {
@@ -80,21 +80,31 @@ export default function App() {
   }, [dispatch]);
 
   return (
-    <div className="app">
-      <Sidebar />
-      <main className="main">
-        {view === "home" ? <Home /> : null}
-        {view === "devices" ? <Devices /> : null}
-        {view === "queue" ? <Queue /> : null}
-        {view === "history" ? <History /> : null}
-        {view === "watch" ? <WatchFolders /> : null}
-        {view === "settings" ? <SettingsView /> : null}
-      </main>
-      {dragging && view !== "home" ? (
+    <div className="shell">
+      <div className="bg-glow" />
+      <Titlebar />
+      <div className="app-body">
+        <Rail />
+        <div className="content">
+          <TopBar />
+          {view === "send" ? <Send /> : null}
+          {view === "flow" ? <Flow /> : null}
+          {view === "watch" ? <Watch /> : null}
+          {view === "settings" ? <SettingsView /> : null}
+        </div>
+      </div>
+      {dragging && view !== "send" ? (
         <div className="drop-overlay">
           <div className="drop-overlay-inner">
-            <IconDrop size={24} />
-            Release to send
+            <div className="hero-rings" style={{ width: 72, height: 72 }}>
+              <span className="ring-a" />
+              <span className="ring-b" style={{ inset: 13 }} />
+              <IconDrop size={24} />
+            </div>
+            <div className="drop-overlay-title">Release to send</div>
+            <div className="drop-overlay-sub">
+              original bytes · verified on arrival
+            </div>
           </div>
         </div>
       ) : null}

@@ -25,13 +25,23 @@ import {
   type WatchFolderConfig,
 } from "./types";
 
-export type View =
-  | "home"
-  | "devices"
-  | "queue"
-  | "history"
-  | "watch"
-  | "settings";
+/** The redesign's IA: three rail tabs + the settings gear. */
+export type View = "send" | "flow" | "watch" | "settings";
+
+/** Old view names (tray menu / older emitters) → new IA. */
+const LEGACY_VIEWS: Record<string, View> = {
+  home: "send",
+  queue: "flow",
+  history: "flow",
+  devices: "settings",
+  send: "send",
+  flow: "flow",
+  watch: "watch",
+  settings: "settings",
+};
+
+/** Sparkline memory: recent speed samples per active transfer. */
+const MAX_SPARK_SAMPLES = 32;
 
 export interface AppState {
   loaded: boolean;
@@ -49,11 +59,15 @@ export interface AppState {
   dragging: boolean;
   /** Files dropped/picked, waiting for the user to choose a target device. */
   pendingPaths: string[] | null;
+  /** Recent speedBps samples per transferId (for the throughput sparkline). */
+  speedSamples: Record<string, number[]>;
+  /** Device pinned in the top-bar chip; falls back to first online. */
+  chipDeviceId: string | null;
 }
 
 const initialState: AppState = {
   loaded: false,
-  view: "home",
+  view: "send",
   info: null,
   settings: null,
   devices: [],
@@ -65,6 +79,8 @@ const initialState: AppState = {
   paused: false,
   dragging: false,
   pendingPaths: null,
+  speedSamples: {},
+  chipDeviceId: null,
 };
 
 export type Action =
@@ -88,6 +104,7 @@ export type Action =
   | { type: "set-history"; history: HistoryEntry[] }
   | { type: "set-watch-folders"; folders: WatchFolderConfig[] }
   | { type: "remove-detection"; detectionId: string }
+  | { type: "set-chip-device"; deviceId: string | null }
   | { type: "dismiss-pairing" };
 
 function upsertTransfer(
@@ -99,6 +116,25 @@ function upsertTransfer(
   const next = queue.slice();
   next[idx] = t;
   return next;
+}
+
+/** Keep sparkline samples in sync with a transfer update. */
+function nextSamples(
+  samples: Record<string, number[]>,
+  t: TransferSummary,
+): Record<string, number[]> {
+  if (isTerminal(t.state)) {
+    if (!(t.transferId in samples)) return samples;
+    const pruned = { ...samples };
+    delete pruned[t.transferId];
+    return pruned;
+  }
+  if (t.state !== "transferring" || t.speedBps <= 0) return samples;
+  const prev = samples[t.transferId] ?? [];
+  return {
+    ...samples,
+    [t.transferId]: [...prev, t.speedBps].slice(-MAX_SPARK_SAMPLES),
+  };
 }
 
 function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
@@ -124,7 +160,11 @@ function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
       }
       return { ...state, pairing: null };
     case "transferUpdated":
-      return { ...state, queue: upsertTransfer(state.queue, ev.transfer) };
+      return {
+        ...state,
+        queue: upsertTransfer(state.queue, ev.transfer),
+        speedSamples: nextSamples(state.speedSamples, ev.transfer),
+      };
     case "watchFileDetected": {
       if (ev.auto) return state; // auto-send detections are handled by core
       if (state.detections.some((d) => d.detectionId === ev.detectionId)) {
@@ -188,6 +228,8 @@ function reducer(state: AppState, action: Action): AppState {
           (d) => d.detectionId !== action.detectionId,
         ),
       };
+    case "set-chip-device":
+      return { ...state, chipDeviceId: action.deviceId };
     case "dismiss-pairing":
       return { ...state, pairing: null };
   }
@@ -268,8 +310,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
 
     listen<string>("sendro://navigate", (event) => {
-      const view = event.payload as View;
-      dispatch({ type: "set-view", view });
+      const view = LEGACY_VIEWS[event.payload];
+      if (view) dispatch({ type: "set-view", view });
     }).then((un) => {
       if (disposed) un();
       else unlisteners.push(un);

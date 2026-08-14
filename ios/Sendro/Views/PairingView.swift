@@ -2,20 +2,23 @@
 //  PairingView.swift
 //  Sendro
 //
-//  6-digit code entry (code shown on the PC). Computes the HKDF/HMAC proof
-//  from PROTOCOL.md §4.2 — the code itself never crosses the wire.
+//  6-digit code entry pane (code shown on the PC), embedded in the Devices
+//  sheet. Computes the HKDF/HMAC proof from PROTOCOL.md §4.2 — the code
+//  itself never crosses the wire. Custom in-sheet keypad, expiry countdown,
+//  wrong-code retry.
 //
 
 import SwiftUI
 import Combine
 
-struct PairingView: View {
+struct PairingPane: View {
 
     let target: PairTarget
+    let onFinished: () -> Void
+    let onCancel: () -> Void
 
     @EnvironmentObject private var settings: Settings
     @EnvironmentObject private var pairedHosts: PairedHostStore
-    @Environment(\.dismiss) private var dismiss
 
     private enum Stage: Equatable {
         case starting
@@ -31,135 +34,205 @@ struct PairingView: View {
     @State private var code = ""
     @State private var inlineError: String?
     @State private var remainingSeconds = 120
-    @FocusState private var codeFocused: Bool
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
-                Spacer(minLength: 12)
-
-                Image(systemName: "laptopcomputer.and.iphone")
-                    .font(.system(size: 44))
-                    .foregroundColor(.accentColor)
-
-                VStack(spacing: 6) {
-                    Text("Pair with \(target.name)")
-                        .font(.title2.weight(.semibold))
-                    Text("Type the 6-digit code shown on your PC.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Button(action: onCancel) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(Theme.textBase.opacity(0.8))
+                        .frame(width: 32, height: 32)
+                        .glassRow(cornerRadius: 12, fillOpacity: 0.07, borderOpacity: 0.1)
                 }
+                .buttonStyle(PressableButtonStyle())
+                .disabled(stage == .confirming)
+                .accessibilityLabel("Back")
 
-                switch stage {
-                case .starting:
-                    ProgressView("Contacting \(target.name)…")
-                        .padding(.top, 20)
+                Text(target.name)
+                    .font(Theme.sans(22, .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+            }
 
-                case .enterCode, .confirming:
-                    codeEntry
-                    if stage == .confirming {
-                        ProgressView("Verifying…")
-                    } else {
+            Text("Type the 6-digit code shown on your PC. The code itself never crosses the wire.")
+                .font(Theme.sans(13.5))
+                .foregroundColor(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+
+            switch stage {
+            case .starting:
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(Theme.irisSoft)
+                    Text("Contacting \(target.name)…")
+                        .font(Theme.mono(12))
+                        .foregroundColor(Theme.textBase.opacity(0.6))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 36)
+                .padding(.bottom, 24)
+
+            case .enterCode, .confirming:
+                codeCells
+                    .padding(.top, 22)
+
+                if stage == .confirming {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .tint(Theme.irisSoft)
+                        Text("Sending HMAC proof…")
+                            .font(Theme.mono(12))
+                            .foregroundColor(Theme.textBase.opacity(0.6))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 20)
+                } else {
+                    Group {
                         if let inlineError {
                             Text(inlineError)
-                                .font(.subheadline)
-                                .foregroundColor(.red)
+                                .font(Theme.sans(13))
+                                .foregroundColor(Theme.danger)
+                        } else {
+                            Text(remainingSeconds > 0
+                                 ? "Code expires in \(remainingSeconds)s"
+                                 : "Code expired — restart pairing on your PC.")
+                                .font(Theme.mono(11.5))
+                                .foregroundColor(remainingSeconds > 10
+                                                 ? Theme.textBase.opacity(0.45)
+                                                 : Theme.warn)
                         }
-                        Text(remainingSeconds > 0
-                             ? "Code expires in \(remainingSeconds)s"
-                             : "Code expired — restart pairing on your PC.")
-                            .font(.footnote)
-                            .foregroundColor(remainingSeconds > 10 ? .secondary : .orange)
                     }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 16)
 
-                case .done:
-                    Label("Paired!", systemImage: "checkmark.circle.fill")
-                        .font(.title3.weight(.semibold))
-                        .foregroundColor(.green)
+                    keypad
+                        .padding(.top, 18)
+                }
 
-                case .failed(let message):
-                    VStack(spacing: 14) {
-                        Label("Pairing failed", systemImage: "xmark.octagon.fill")
-                            .font(.headline)
-                            .foregroundColor(.red)
-                        Text(message)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("Try Again") {
-                            Task { await startPairing() }
-                        }
-                        .buttonStyle(.borderedProminent)
+            case .done:
+                HStack(spacing: 9) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(Theme.teal)
+                    Text("Paired")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundColor(Theme.teal)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 36)
+                .padding(.bottom, 24)
+                .transition(.scale(scale: 0.86).combined(with: .opacity))
+
+            case .failed(let message):
+                VStack(spacing: 14) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "xmark.octagon")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Pairing failed")
+                            .font(Theme.sans(15, .semibold))
                     }
-                    .padding(.top, 8)
-                }
+                    .foregroundColor(Theme.danger)
 
-                Spacer()
-            }
-            .padding(.horizontal, 24)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Text(message)
+                        .font(Theme.sans(13))
+                        .foregroundColor(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button {
+                        Task { await startPairing() }
+                    } label: {
+                        AccentPillLabel(title: "Try Again")
+                            .frame(maxWidth: 200)
+                    }
+                    .buttonStyle(PressableButtonStyle())
                 }
-            }
-            .task {
-                await startPairing()
-            }
-            .onReceive(timer) { _ in
-                if stage == .enterCode || stage == .confirming {
-                    if remainingSeconds > 0 { remainingSeconds -= 1 }
-                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 28)
             }
         }
-        .interactiveDismissDisabled(stage == .confirming)
+        .task {
+            await startPairing()
+        }
+        .onReceive(timer) { _ in
+            if stage == .enterCode || stage == .confirming {
+                if remainingSeconds > 0 { remainingSeconds -= 1 }
+            }
+        }
     }
 
-    // MARK: Code entry UI
+    // MARK: Code cells
 
-    private var codeEntry: some View {
-        ZStack {
-            TextField("", text: $code)
-                .keyboardType(.numberPad)
-                .textContentType(.oneTimeCode)
-                .focused($codeFocused)
-                .opacity(0.02)
-                .frame(width: 1, height: 1)
+    private var codeCells: some View {
+        HStack(spacing: 8) {
+            ForEach(0..<6, id: \.self) { index in
+                let characters = Array(code)
+                let digit = index < characters.count ? String(characters[index]) : ""
+                let isCursor = index == code.count && stage == .enterCode
+                Text(digit)
+                    .font(Theme.mono(26, .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 60)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(isCursor
+                                          ? Color.white.opacity(0.55)
+                                          : Color.white.opacity(0.1),
+                                          lineWidth: isCursor ? 1 : 0.5)
+                    )
+            }
+        }
+    }
 
-            HStack(spacing: 10) {
-                ForEach(0..<6, id: \.self) { index in
-                    let characters = Array(code)
-                    let digit = index < characters.count ? String(characters[index]) : ""
-                    Text(digit)
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .frame(width: 46, height: 60)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color(.secondarySystemBackground))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(index == code.count && codeFocused
-                                        ? Color.accentColor : Color.clear,
-                                        lineWidth: 2)
-                        )
+    // MARK: Keypad
+
+    private var keypad: some View {
+        let keys: [String] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"]
+        let columns = [GridItem(.flexible(), spacing: 9),
+                       GridItem(.flexible(), spacing: 9),
+                       GridItem(.flexible(), spacing: 9)]
+        return LazyVGrid(columns: columns, spacing: 9) {
+            ForEach(keys, id: \.self) { key in
+                if key.isEmpty {
+                    Color.clear
+                        .frame(height: 52)
+                } else {
+                    Button {
+                        press(key)
+                    } label: {
+                        Text(key)
+                            .font(Theme.mono(22, .medium))
+                            .foregroundColor(Theme.textBase.opacity(0.93))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .glassRow(cornerRadius: 16, fillOpacity: 0.06, borderOpacity: 0.09)
+                    }
+                    .buttonStyle(PressableButtonStyle())
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture { codeFocused = true }
         }
-        .onChange(of: code) { newValue in
-            let filtered = String(newValue.filter { $0.isNumber }.prefix(6))
-            if filtered != newValue {
-                code = filtered
-                return
-            }
-            if filtered.count == 6, stage == .enterCode {
-                Task { await confirm() }
-            }
+    }
+
+    private func press(_ key: String) {
+        guard stage == .enterCode else { return }
+        inlineError = nil
+        if key == "⌫" {
+            if !code.isEmpty { code.removeLast() }
+            return
+        }
+        guard code.count < 6 else { return }
+        code += key
+        if code.count == 6 {
+            Task { await confirm() }
         }
     }
 
@@ -171,7 +244,8 @@ struct PairingView: View {
         inlineError = nil
         code = ""
         guard let client = SendroClient(host: target.host, port: target.port) else {
-            stage = .failed("Invalid host address.")
+            stage = .failed("Invalid host address (\(target.host):\(String(target.port))). "
+                + "Try Connect by IP with the address shown in Sendro on your PC.")
             return
         }
         do {
@@ -189,7 +263,6 @@ struct PairingView: View {
             salt = response.salt
             remainingSeconds = response.expiresInSeconds
             stage = .enterCode
-            codeFocused = true
         } catch {
             stage = .failed("Could not start pairing: \(error.localizedDescription)")
         }
@@ -221,9 +294,11 @@ struct PairingView: View {
                                        lastHost: target.host,
                                        lastPort: target.port,
                                        pairedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
-            stage = .done
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            dismiss()
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.75)) {
+                stage = .done
+            }
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            onFinished()
         } catch {
             if let clientError = error as? SendroClientError, let status = clientError.httpStatus {
                 switch status {
@@ -231,7 +306,6 @@ struct PairingView: View {
                     inlineError = "Wrong code — check the number on your PC."
                     code = ""
                     stage = .enterCode
-                    codeFocused = true
                 case 429:
                     stage = .failed("Too many wrong attempts. Start a new pairing on your PC.")
                 case 400:

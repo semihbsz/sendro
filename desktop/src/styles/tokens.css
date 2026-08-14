@@ -1,43 +1,78 @@
-/* Sendro design tokens — dark, premium, restrained. */
+/* Sendro design tokens — near-black glass, violet-indigo beam, mono data.
+   Rebuilt around the "Sendro PC — Yeni Tasarım" handoff. */
 
 :root {
   /* Surfaces */
-  --bg-base: #0b0d10;
-  --bg-panel: #12151a;
-  --bg-raised: #1a1e24;
-  --bg-hover: rgba(255, 255, 255, 0.04);
-  --bg-active: rgba(255, 255, 255, 0.07);
+  --bg-base: #07080b;
+  --bg-radial: radial-gradient(
+    1200px 700px at 50% -10%,
+    #161a2e 0%,
+    #0a0b10 55%,
+    #07080b 100%
+  );
 
-  /* The Sendro beam */
-  --accent: #37e6c4;
-  --accent-strong: #2bd4b4;
-  --accent-dim: rgba(55, 230, 196, 0.12);
-  --accent-border: rgba(55, 230, 196, 0.35);
-  --accent-glow: 0 0 20px rgba(55, 230, 196, 0.22);
-  --accent-text-on: #06251e;
+  /* Glass fills (layer on blur where supported) */
+  --glass-1: rgba(255, 255, 255, 0.025);
+  --glass-2: rgba(255, 255, 255, 0.04);
+  --glass-3: rgba(255, 255, 255, 0.05);
+  --glass-4: rgba(255, 255, 255, 0.06);
+  --glass-5: rgba(255, 255, 255, 0.075);
+  --glass-hover: rgba(255, 255, 255, 0.09);
+  --glass-active: rgba(255, 255, 255, 0.11);
+
+  /* Accent — the violet-indigo beam */
+  --accent: oklch(0.72 0.18 265);
+  --accent-hi: oklch(0.82 0.15 265);
+  --accent-bright: oklch(0.86 0.12 265);
+  --accent-pale: oklch(0.9 0.1 265);
+  --accent-soft: oklch(0.72 0.18 265 / 0.16);
+  --accent-softer: oklch(0.72 0.18 265 / 0.12);
+  --accent-border: oklch(0.72 0.18 265 / 0.35);
+  --accent-border-hot: oklch(0.72 0.18 265 / 0.55);
+  --accent-glow: 0 8px 26px oklch(0.72 0.18 265 / 0.38);
+  --accent-text-on: #0a0b14;
+
+  /* Verified / online — the original Sendro teal, kept for integrity states */
+  --verify: #37e6c4;
+  --verify-dim: rgba(55, 230, 196, 0.12);
+  --verify-glow: 0 0 10px rgba(55, 230, 196, 0.6);
 
   /* Text */
-  --text-primary: #e8eaed;
-  --text-secondary: #9aa0a8;
-  --text-tertiary: #626870;
+  --text-bright: #f5f6fa;
+  --text-primary: #f2f3f7;
+  --text-soft: #eef0f6;
+  --text-secondary: rgba(242, 243, 247, 0.5);
+  --text-faint: rgba(242, 243, 247, 0.42);
+  --text-tertiary: rgba(242, 243, 247, 0.35);
+  --text-ghost: rgba(242, 243, 247, 0.3);
 
   /* Semantic */
-  --danger: #f26d6d;
-  --danger-dim: rgba(242, 109, 109, 0.12);
+  --danger: rgba(255, 140, 140, 0.9);
+  --danger-strong: #ff8c8c;
+  --danger-bg: rgba(255, 90, 90, 0.14);
+  --danger-bg-hot: rgba(255, 90, 90, 0.18);
   --warn: #e8c268;
   --warn-dim: rgba(232, 194, 104, 0.12);
-  --ok: #37e6c4;
+  --close-hover: #c42b1c;
 
-  /* Lines */
+  /* Hairlines */
+  --hairline: 0.5px solid rgba(255, 255, 255, 0.07);
+  --hairline-strong: 0.5px solid rgba(255, 255, 255, 0.1);
+  --hairline-bright: 0.5px solid rgba(255, 255, 255, 0.12);
   --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.1);
+  --border-bright: rgba(255, 255, 255, 0.12);
 
-  /* Shape */
-  --radius-sm: 8px;
-  --radius: 10px;
-  --radius-lg: 14px;
+  /* Shape — large, soft radii */
+  --r-xs: 11px;
+  --r-sm: 13px;
+  --r-md: 14px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-2xl: 26px;
+  --r-hero: 28px;
 
-  /* Spacing grid (8px) */
+  /* Spacing grid */
   --s-1: 4px;
   --s-2: 8px;
   --s-3: 12px;
@@ -48,24 +83,18 @@
   --s-8: 64px;
 
   /* Type */
-  --font-sans:
-    "Inter", "Inter Variable", -apple-system, "Segoe UI Variable",
-    "Segoe UI", system-ui, sans-serif;
+  --font-ui:
+    "Instrument Sans", -apple-system, "Segoe UI Variable", "Segoe UI",
+    system-ui, sans-serif;
   --font-mono:
     "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
-  --fs-xs: 11px;
-  --fs-sm: 12.5px;
-  --fs-base: 13.5px;
-  --fs-md: 15px;
-  --fs-lg: 18px;
-  --fs-xl: 24px;
 
   /* Motion */
-  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
-  --t-fast: 150ms var(--ease);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --t-fast: 150ms var(--ease-out);
+  --t-view: 380ms var(--ease-out);
 
   /* Shadows */
-  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-modal:
-    0 0 0 1px rgba(255, 255, 255, 0.06), 0 24px 64px rgba(0, 0, 0, 0.6);
+  --shadow-modal: 0 40px 100px rgba(0, 0, 0, 0.6);
+  --shadow-window: 0 50px 120px rgba(0, 0, 0, 0.65);
 }

@@ -3,8 +3,19 @@ import { Modal } from "./Modal";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
 import { baseName, formatRelative, isOnline } from "../format";
-import { IconFile, IconPhone } from "../icons";
+import { IconChevronRight, IconPhone } from "../icons";
 import { EmptyState } from "./common";
+
+/** File extension badge text, e.g. "MOV" — falls back to a count. */
+function badgeFor(paths: string[]): string {
+  if (paths.length > 1) return `×${paths.length}`;
+  const name = baseName(paths[0] ?? "");
+  const dot = name.lastIndexOf(".");
+  if (dot > 0 && dot < name.length - 1) {
+    return name.slice(dot + 1).slice(0, 4);
+  }
+  return "DIR";
+}
 
 /** Shown when files are pending (drop / picker / tray) and a target
  *  device needs to be chosen. */
@@ -27,7 +38,7 @@ export function DevicePicker() {
     try {
       await api.offerFiles(deviceId, pendingPaths, false);
       dispatch({ type: "set-pending", paths: null });
-      dispatch({ type: "set-view", view: "queue" });
+      dispatch({ type: "set-view", view: "flow" });
       const queue = await api.getQueue();
       dispatch({ type: "set-queue", queue });
     } catch (err) {
@@ -43,23 +54,22 @@ export function DevicePicker() {
       : `${pendingPaths.length} items`;
 
   return (
-    <Modal title="Send to…" onClose={close}>
-      <div className="picker-file-summary">
-        <IconFile size={16} />
-        <span
-          style={{
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {summary}
-        </span>
+    <Modal title="Send to…" onClose={close} cancelLabel="Cancel">
+      <div className="picker-file">
+        <span className="picker-file-badge">{badgeFor(pendingPaths)}</span>
+        <div className="picker-file-main">
+          <div className="picker-file-name">{summary}</div>
+          <div className="picker-file-sub">
+            {pendingPaths.length === 1
+              ? "ready to send"
+              : "sent as one batch, verified per file"}
+          </div>
+        </div>
       </div>
 
       {devices.length === 0 ? (
         <EmptyState
-          icon={<IconPhone size={20} />}
+          icon={<IconPhone size={22} />}
           title="No paired devices"
           subtitle="Open Sendro on your iPhone and tap this PC to pair."
         />
@@ -73,34 +83,28 @@ export function DevicePicker() {
               disabled={sending}
               onClick={() => void send(d.deviceId)}
             >
-              <span className="row-icon">
-                <IconPhone size={17} />
+              <span className={`picker-device-dot${online ? "" : " off"}`}>
+                <span className="dot" />
               </span>
-              <span className="row-main">
-                <span className="row-title">{d.deviceName}</span>
-                <span className="row-sub status-row">
-                  <span className={`status-dot${online ? "" : " off"}`} />
+              <span className="picker-device-main">
+                <span className="picker-device-name">{d.deviceName}</span>
+                <span
+                  className={`picker-device-state${online ? "" : " off"}`}
+                >
                   {online
-                    ? "Online"
-                    : `Last seen ${formatRelative(d.lastSeenMs)}`}
+                    ? "online now"
+                    : `last seen ${formatRelative(d.lastSeenMs)}`}
                 </span>
+              </span>
+              <span className="picker-device-chev">
+                <IconChevronRight size={12} />
               </span>
             </button>
           );
         })
       )}
 
-      {error ? (
-        <div
-          style={{
-            marginTop: "var(--s-3)",
-            color: "var(--danger)",
-            fontSize: "var(--fs-sm)",
-          }}
-        >
-          {error}
-        </div>
-      ) : null}
+      {error ? <div className="error-note">{error}</div> : null}
     </Modal>
   );
 }

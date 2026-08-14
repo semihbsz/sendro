@@ -45,6 +45,8 @@ struct SendroClient {
     var token: String?
 
     /// Shared session for API calls (downloads use their own session).
+    /// Fail-fast on purpose: ping / accept / status should error immediately
+    /// when the host is unreachable so callers can react.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = false
@@ -54,8 +56,43 @@ struct SendroClient {
         return URLSession(configuration: config)
     }()
 
+    /// Session dedicated to the outbox long poll. Unlike the fail-fast API
+    /// session it waits for connectivity, so a transient Wi-Fi blip parks the
+    /// poll instead of erroring it into backoff; the resource timeout still
+    /// bounds every attempt so the poll loop can never hang forever.
+    private static let pollSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 40   // long poll 25s + slack
+        config.timeoutIntervalForResource = 90  // caps time spent waiting for connectivity
+        config.httpAdditionalHeaders = ["Accept": "application/json"]
+        return URLSession(configuration: config)
+    }()
+
     init?(host: String, port: UInt16, token: String? = nil) {
-        guard !host.isEmpty, let url = URL(string: "http://\(host):\(port)") else { return nil }
+        // Be forgiving about what lands here (manual entry, resolver quirks):
+        // trim whitespace, drop a pasted scheme/trailing slash, strip any
+        // interface scope ("%en0"), and bracket bare IPv6 literals.
+        var cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        for scheme in ["http://", "https://"] where cleaned.lowercased().hasPrefix(scheme) {
+            cleaned = String(cleaned.dropFirst(scheme.count))
+        }
+        if let slash = cleaned.firstIndex(of: "/") { cleaned = String(cleaned[..<slash]) }
+        if !cleaned.hasPrefix("["), let pct = cleaned.firstIndex(of: "%") {
+            cleaned = String(cleaned[..<pct])
+        }
+        if cleaned.contains(":") && !cleaned.hasPrefix("[") {
+            // Either a bare IPv6 literal, or "ip:port" pasted into the host
+            // field. Two or more colons → IPv6, bracket it. Exactly one
+            // colon → treat the tail as a (discarded) port.
+            let colonCount = cleaned.filter { $0 == ":" }.count
+            if colonCount >= 2 {
+                cleaned = "[\(cleaned)]"
+            } else if let colon = cleaned.firstIndex(of: ":") {
+                cleaned = String(cleaned[..<colon])
+            }
+        }
+        guard !cleaned.isEmpty, let url = URL(string: "http://\(cleaned):\(port)") else { return nil }
         self.baseURL = url
         self.token = token
     }
@@ -80,7 +117,8 @@ struct SendroClient {
 
     func outboxLongPoll(waitSeconds: Int = 25) async throws -> OutboxResponse {
         try await get("/api/v1/outbox?waitSeconds=\(waitSeconds)",
-                      timeout: TimeInterval(waitSeconds + 12))
+                      timeout: TimeInterval(waitSeconds + 12),
+                      session: SendroClient.pollSession)
     }
 
     @discardableResult
@@ -120,7 +158,9 @@ struct SendroClient {
         }
     }
 
-    private func get<Response: Decodable>(_ path: String, timeout: TimeInterval) async throws -> Response {
+    private func get<Response: Decodable>(_ path: String,
+                                          timeout: TimeInterval,
+                                          session: URLSession = SendroClient.session) async throws -> Response {
         guard let url = URL(string: path, relativeTo: baseURL) else {
             throw SendroClientError.badURL
         }
@@ -128,7 +168,7 @@ struct SendroClient {
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
         applyAuth(&request)
-        return try await execute(request)
+        return try await execute(request, session: session)
     }
 
     private func post<Response: Decodable>(_ path: String, timeout: TimeInterval) async throws -> Response {
@@ -157,8 +197,9 @@ struct SendroClient {
         return try await execute(request)
     }
 
-    private func execute<Response: Decodable>(_ request: URLRequest) async throws -> Response {
-        let (data, response) = try await Self.session.data(for: request)
+    private func execute<Response: Decodable>(_ request: URLRequest,
+                                              session: URLSession = SendroClient.session) async throws -> Response {
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw SendroClientError.badResponse
         }

@@ -45,22 +45,37 @@ enum MediaImporter {
 
     /// nil = not an importable media type (keep it in Files instead).
     static func mediaKind(forFileName fileName: String) -> MediaKind? {
-        let ext = (fileName as NSString).pathExtension
-        guard !ext.isEmpty, let type = UTType(filenameExtension: ext.lowercased()) else {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return nil }
+        if let type = UTType(filenameExtension: ext) {
+            if type.conforms(to: .movie) { return .video }
+            if type.conforms(to: .image) { return .photo }
+        }
+        // Fallback table: UTType lookup can miss, or return a dynamic type
+        // conforming to neither, for perfectly importable extensions.
+        switch ext {
+        case "jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "dng", "gif", "webp", "bmp":
+            return .photo
+        case "mov", "mp4", "m4v":
+            return .video
+        default:
             return nil
         }
-        if type.conforms(to: .movie) { return .video }
-        if type.conforms(to: .image) { return .photo }
-        return nil
     }
 
-    /// Import a verified file into the photo library.
+    /// Import a verified file into the photo library. Original bytes only —
+    /// no re-encode, no transformation.
+    /// - Parameter originalFilename: the real (offer) file name; the staged
+    ///   on-disk name may carry a transferId prefix, so pass this explicitly.
     /// - Parameter moveFile: when true PhotoKit takes ownership of the file
     ///   (it is moved, not copied) — maps to "Delete temp after import".
     static func importToPhotos(fileURL: URL,
                                kind: MediaKind,
+                               originalFilename: String,
                                moveFile: Bool,
                                addToAlbum: Bool) async throws {
+        // Add-only access is requested up front — the very first import
+        // triggers the system prompt.
         let addStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard addStatus == .authorized || addStatus == .limited else {
             throw MediaImportError.notAuthorized
@@ -68,18 +83,28 @@ enum MediaImporter {
 
         var album: PHAssetCollection?
         if addToAlbum {
+            // Album filing needs .readWrite. If that's not granted we STILL
+            // import the asset — just without the album; album auth must
+            // never fail the whole import.
             let rwStatus = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             if rwStatus == .authorized {
                 album = try? await fetchOrCreateAlbum(named: albumName)
             }
         }
 
+        let options = PHAssetResourceCreationOptions()
+        options.shouldMoveFile = moveFile
+        options.originalFilename = originalFilename
+        // Name the concrete type when the system knows the extension, so
+        // PhotoKit never has to guess from the (possibly prefixed) URL.
+        let ext = (originalFilename as NSString).pathExtension.lowercased()
+        if !ext.isEmpty, let type = UTType(filenameExtension: ext) {
+            options.uniformTypeIdentifier = type.identifier
+        }
+
         let library = PHPhotoLibrary.shared()
         try await library.performChanges {
             let creation = PHAssetCreationRequest.forAsset()
-            let options = PHAssetResourceCreationOptions()
-            options.shouldMoveFile = moveFile
-            options.originalFilename = fileURL.lastPathComponent
             creation.addResource(with: kind.resourceType, fileURL: fileURL, options: options)
             if let album,
                let placeholder = creation.placeholderForCreatedAsset,

@@ -1,13 +1,15 @@
 import type { ReactNode } from "react";
-import { IconX } from "../icons";
 
 export function Modal({
   title,
   onClose,
+  cancelLabel,
   children,
 }: {
   title?: string;
   onClose?: () => void;
+  /** Optional centered dismiss link at the modal's foot (design language). */
+  cancelLabel?: string;
   children: ReactNode;
 }) {
   return (
@@ -18,21 +20,13 @@ export function Modal({
       }}
     >
       <div className="modal" role="dialog" aria-modal="true">
-        {title ? (
-          <div className="modal-header">
-            <div className="modal-title">{title}</div>
-            {onClose ? (
-              <button
-                className="btn btn-icon btn-ghost"
-                onClick={onClose}
-                aria-label="Close"
-              >
-                <IconX size={16} />
-              </button>
-            ) : null}
-          </div>
+        {title ? <div className="modal-title">{title}</div> : null}
+        {children}
+        {onClose && cancelLabel ? (
+          <button className="modal-cancel" onClick={onClose}>
+            {cancelLabel}
+          </button>
         ) : null}
-        <div className="modal-body">{children}</div>
       </div>
     </div>
   );

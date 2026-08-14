@@ -167,7 +167,14 @@ final class DiscoveryService: ObservableObject {
         guard !resolving.contains(key) else { return }
         resolving.insert(key)
 
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        // Force IPv4: Windows advertises IPv6 (often link-local fe80::%scope)
+        // over mDNS too, and scoped IPv6 literals don't survive the trip into
+        // a URL. Every home/studio LAN Sendro targets has IPv4.
+        let params = NWParameters.tcp
+        if let ipOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ipOptions.version = .v4
+        }
+        let connection = NWConnection(to: endpoint, using: params)
         var finished = false
 
         let finish: (String?, UInt16?) -> Void = { [weak self] ip, port in
@@ -211,7 +218,10 @@ final class DiscoveryService: ObservableObject {
     static func string(for host: NWEndpoint.Host) -> String {
         switch host {
         case .ipv4(let address):
-            return "\(address)"
+            // IPv4 can carry an interface scope too ("169.254.1.2%en0") —
+            // strip it, it's meaningless inside a URL.
+            let raw = "\(address)"
+            return raw.split(separator: "%").first.map(String.init) ?? raw
         case .ipv6(let address):
             // Strip any scope suffix ("%en0") — bracket form for URLs.
             let raw = "\(address)"

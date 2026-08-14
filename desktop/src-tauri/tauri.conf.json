@@ -20,7 +20,8 @@
         "minHeight": 640,
         "center": true,
         "resizable": true,
-        "backgroundColor": "#0B0D10",
+        "decorations": false,
+        "backgroundColor": "#07080B",
         "dragDropEnabled": true
       }
     ],

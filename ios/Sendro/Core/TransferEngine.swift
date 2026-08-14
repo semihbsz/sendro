@@ -25,6 +25,7 @@ enum TransferPhase: Equatable {
     case verifying
     case awaitingSaveChoice             // media + "Ask" setting
     case saving
+    case photosDenied                   // Photos permission refused; bytes kept, user action needed
     case failed(message: String, resumable: Bool)
     case interrupted                    // restored from a previous launch
 
@@ -35,6 +36,7 @@ enum TransferPhase: Equatable {
         case .verifying:         return "Verifying…"
         case .awaitingSaveChoice: return "Where should this go?"
         case .saving:            return "Saving…"
+        case .photosDenied:      return "Photos Access Needed"
         case .failed:            return "Failed"
         case .interrupted:       return "Paused"
         }
@@ -129,6 +131,22 @@ final class TransferEngine: ObservableObject {
         reconcileLoops()
     }
 
+    /// Call when scenePhase becomes .active. iOS kills in-flight long-polls
+    /// while the app is suspended, and the loops may be parked in a backoff
+    /// sleep of up to 15 s. Cancel and restart every loop so each paired
+    /// host is re-pinged (fresh online state) and re-polled immediately —
+    /// a reachable host shows connected within ~1–2 s, no user action.
+    func applicationDidBecomeActive() {
+        guard started else { return }
+        for task in pollTasks.values { task.cancel() }
+        pollTasks.removeAll()
+        // Whatever we knew before suspension is stale — clear it so each
+        // fresh loop re-pings and the indicator reflects reality, not the
+        // last pre-suspension failure (or success).
+        hostOnline.removeAll()
+        reconcileLoops()   // spawns fresh loops (backoff starts at zero)
+    }
+
     // MARK: Pairing management
 
     func unpair(hostId: String) {
@@ -184,10 +202,12 @@ final class TransferEngine: ObservableObject {
             download.cancel()            // outcome .cancelled flows through handleOutcome
             return
         }
-        // Not currently running (failed / interrupted / awaiting choice).
+        // Not currently running (failed / interrupted / awaiting choice /
+        // photos-denied).
         guard let idx = active.firstIndex(where: { $0.id == transferId }) else { return }
         let transfer = active[idx]
         try? FileManager.default.removeItem(at: AppPaths.partFileURL(transferId: transferId))
+        try? FileManager.default.removeItem(at: Self.stagedImportURL(for: transfer.offer))
         removeRecord(transferId)
         active.remove(at: idx)
         sendStatus(transfer.hostId, transferId, StatusReport(state: "cancelled"))
@@ -216,12 +236,14 @@ final class TransferEngine: ObservableObject {
         }
     }
 
-    /// User answered the "save to Photos or keep in Files?" question.
+    /// User answered the "save to Photos or keep in Files?" question, or is
+    /// retrying / redirecting after a Photos permission denial.
     func resolveSaveChoice(transferId: String, saveToPhotos: Bool) {
         guard let transfer = active.first(where: { $0.id == transferId }),
-              transfer.phase == .awaitingSaveChoice else { return }
-        let fileURL = AppPaths.partFileURL(transferId: transferId)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+              transfer.phase == .awaitingSaveChoice || transfer.phase == .photosDenied else { return }
+        // The verified bytes may still be the raw .part file, or already
+        // staged under the real name by an earlier import attempt.
+        guard let fileURL = pendingFileURL(for: transfer.offer) else {
             setPhase(transferId, .failed(message: "Temp file went missing.", resumable: true))
             return
         }
@@ -269,27 +291,57 @@ final class TransferEngine: ObservableObject {
         }
     }
 
+    /// Immortal per-host loop. Invariants:
+    /// - Online state comes ONLY from ping / long-poll success (manual hosts
+    ///   have no mDNS presence, so discovery must never drive the indicator).
+    /// - A 200 with an empty offers array is the normal long-poll timeout:
+    ///   mark online and re-poll immediately, no delay.
+    /// - A long-poll error alone never marks the host offline: the poll
+    ///   socket dies routinely (app suspension → -999/-1001, keep-alive
+    ///   reuse → -1005) while the host is perfectly reachable, so we confirm
+    ///   with a fast ping first.
+    /// - Real unreachability (refused / no route) backs off 1→2→4→8→15 s,
+    ///   capped at 15 s, and retries forever — never a terminal stop.
     private func pollLoop(hostId: String) async {
-        var backoffSeconds: UInt64 = 2
+        var backoffSeconds: Double = 0
         while !Task.isCancelled {
             guard let client = client(for: hostId) else {
+                // No stored endpoint/token yet — check again shortly.
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 continue
             }
+            // Fast reachability probe whenever we aren't already known-online
+            // (loop start, after a failure, after foreground restart) so a
+            // reachable host turns green in ~1–2 s instead of after a full
+            // 25 s poll cycle.
+            if hostOnline[hostId] != true, (try? await client.ping()) != nil {
+                if Task.isCancelled { break }
+                markOnline(hostId, true)
+                backoffSeconds = 0
+            }
+            if Task.isCancelled { break }
             do {
                 let response = try await client.outboxLongPoll(waitSeconds: 25)
                 if Task.isCancelled { break }
                 markOnline(hostId, true)
-                backoffSeconds = 2
+                backoffSeconds = 0
                 for offer in response.offers {
                     handleOffer(offer, hostId: hostId)
                 }
                 resumeInterrupted(hostId: hostId)
             } catch {
                 if Task.isCancelled { break }
+                // Distinguish "poll socket died" from "host actually gone".
+                if (try? await client.ping()) != nil {
+                    if Task.isCancelled { break }
+                    markOnline(hostId, true)
+                    backoffSeconds = 0
+                    continue        // host is fine — re-poll immediately
+                }
+                if Task.isCancelled { break }
                 markOnline(hostId, false)
-                try? await Task.sleep(nanoseconds: backoffSeconds * 1_000_000_000)
-                backoffSeconds = min(backoffSeconds * 2, 30)
+                backoffSeconds = backoffSeconds <= 0 ? 1 : min(backoffSeconds * 2, 15)
+                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
             }
         }
     }
@@ -441,6 +493,7 @@ final class TransferEngine: ObservableObject {
 
         case .cancelled:
             try? FileManager.default.removeItem(at: AppPaths.partFileURL(transferId: transferId))
+            try? FileManager.default.removeItem(at: Self.stagedImportURL(for: offer))
             removeRecord(transferId)
             sendStatus(hostId, transferId, StatusReport(state: "cancelled"))
             active.removeAll { $0.id == transferId }
@@ -477,19 +530,46 @@ final class TransferEngine: ObservableObject {
         setPhase(offer.transferId, .saving)
         sendStatus(hostId, offer.transferId, StatusReport(state: "saving"))
         let keepCopy = !settings.deleteTempAfterImport
+
+        // PhotoKit infers the asset's type from the source URL's file
+        // extension, so handing it the raw "<uuid>.part" temp fails for
+        // EVERY photo/video ("file format not supported") — which used to
+        // silently dump all media into Files. Stage the verified bytes under
+        // the real (sanitized) file name first: a same-volume rename, the
+        // original bytes are untouched.
+        let importURL: URL
         do {
-            try await MediaImporter.importToPhotos(fileURL: fileURL,
+            importURL = try stageForImport(offer: offer, from: fileURL)
+        } catch {
+            sendStatus(hostId, offer.transferId,
+                       StatusReport(state: "failed", error: "save failed: \(error.localizedDescription)"))
+            setPhase(offer.transferId,
+                     .failed(message: "Could not save: \(error.localizedDescription)", resumable: false))
+            return
+        }
+
+        do {
+            try await MediaImporter.importToPhotos(fileURL: importURL,
                                                    kind: kind,
+                                                   originalFilename: offer.fileName,
                                                    moveFile: !keepCopy,
                                                    addToAlbum: settings.addToSendroAlbum)
             if keepCopy {
-                try? fileStore.moveIn(from: fileURL, preferredName: offer.fileName)
+                try? fileStore.moveIn(from: importURL, preferredName: offer.fileName)
             }
             finishCompleted(offer: offer, hostId: hostId, savedTo: "photos")
+        } catch MediaImportError.notAuthorized {
+            // Surface it instead of silently rerouting to Files — the user
+            // expects media in their gallery. Bytes stay staged for retry
+            // (Open Settings → grant → Retry), or can be sent to Files.
+            sendStatus(hostId, offer.transferId,
+                       StatusReport(state: "failed", error: "photos permission denied"))
+            setPhase(offer.transferId, .photosDenied)
         } catch {
-            // Never lose verified bytes: fall back to the Files store.
+            // Any other import failure: never lose verified bytes — fall
+            // back to the Files store.
             do {
-                try fileStore.moveIn(from: fileURL, preferredName: offer.fileName)
+                try fileStore.moveIn(from: importURL, preferredName: offer.fileName)
                 finishCompleted(offer: offer, hostId: hostId, savedTo: "files")
             } catch {
                 sendStatus(hostId, offer.transferId,
@@ -498,6 +578,44 @@ final class TransferEngine: ObservableObject {
                          .failed(message: "Could not save: \(error.localizedDescription)", resumable: false))
             }
         }
+    }
+
+    /// Where a transfer's verified bytes get staged (real name, real
+    /// extension) so PhotoKit can recognize the type. transferId prefix
+    /// keeps concurrent same-named transfers apart.
+    private static func stagedImportURL(for offer: TransferOffer) -> URL {
+        AppPaths.incoming.appendingPathComponent(
+            "\(offer.transferId)-\(FileStore.sanitize(fileName: offer.fileName))",
+            isDirectory: false)
+    }
+
+    /// Move the verified temp to its staged import location. Idempotent:
+    /// safe to call again after a failed import attempt (file already staged).
+    private func stageForImport(offer: TransferOffer, from fileURL: URL) throws -> URL {
+        let staged = Self.stagedImportURL(for: offer)
+        let fm = FileManager.default
+        if fileURL.path == staged.path { return staged }        // already staged
+        if fm.fileExists(atPath: fileURL.path) {
+            if fm.fileExists(atPath: staged.path) {
+                try fm.removeItem(at: staged)                   // stale leftover
+            }
+            try fm.moveItem(at: fileURL, to: staged)
+            return staged
+        }
+        if fm.fileExists(atPath: staged.path) { return staged } // staged earlier
+        throw NSError(domain: "Sendro", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "Temp file went missing."
+        ])
+    }
+
+    /// Wherever this transfer's verified bytes currently live, if anywhere.
+    private func pendingFileURL(for offer: TransferOffer) -> URL? {
+        let fm = FileManager.default
+        let staged = Self.stagedImportURL(for: offer)
+        if fm.fileExists(atPath: staged.path) { return staged }
+        let part = AppPaths.partFileURL(transferId: offer.transferId)
+        if fm.fileExists(atPath: part.path) { return part }
+        return nil
     }
 
     private func saveToFilesStore(offer: TransferOffer, hostId: String, fileURL: URL) {
