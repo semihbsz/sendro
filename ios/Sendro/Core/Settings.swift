@@ -20,6 +20,8 @@ final class Settings: ObservableObject {
         static let deleteTempAfterImport = "sendro.deleteTempAfterImport"
         static let addToSendroAlbum = "sendro.addToSendroAlbum"
         static let clientDeviceId = "sendro.clientDeviceId"
+        static let notifyTransfers = "sendro.notifyTransfers"
+        static let notifyMessages = "sendro.notifyMessages"
     }
 
     enum SaveMediaMode: String, CaseIterable, Identifiable {
@@ -86,5 +88,18 @@ final class Settings: ObservableObject {
     var addToSendroAlbum: Bool {
         get { defaults.object(forKey: Keys.addToSendroAlbum) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Keys.addToSendroAlbum); objectWillChange.send() }
+    }
+
+    /// Local notifications for arriving offers and finished/failed transfers.
+    var notifyTransfers: Bool {
+        get { defaults.object(forKey: Keys.notifyTransfers) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.notifyTransfers); objectWillChange.send() }
+    }
+
+    /// Local notifications for incoming §11 text ("… sent you text" only —
+    /// the text itself is never put in a notification body).
+    var notifyMessages: Bool {
+        get { defaults.object(forKey: Keys.notifyMessages) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.notifyMessages); objectWillChange.send() }
     }
 }

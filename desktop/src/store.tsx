@@ -20,7 +20,10 @@ import {
   type HistoryEntry,
   type HostInfo,
   type IncomingMessage,
+  type LinkSession,
   type PairingSession,
+  type PreviewTarget,
+  type QrPairing,
   type Settings,
   type TransferSummary,
   type TrustedDevice,
@@ -72,6 +75,22 @@ export interface AppState {
   messages: IncomingMessage[];
   /** Text waiting in the composer, or null when it is closed. */
   composerText: string | null;
+  /**
+   * The QR payload for the pairing session currently on screen (§13). Only
+   * set while it belongs to `pairing` — a new typed session clears it.
+   */
+  qrPairing: QrPairing | null;
+  /**
+   * The live Sendro Link guest session (§14), or null. RAM only on both
+   * sides: it is never persisted and dies with the app.
+   */
+  link: LinkSession | null;
+  /** True while the Link composer is open — window drops go to it, not SEND. */
+  linkArmed: boolean;
+  /** Files staged for a link session that has not started yet. */
+  linkStaged: string[];
+  /** File the preview modal is showing, or null. */
+  preview: PreviewTarget | null;
 }
 
 const initialState: AppState = {
@@ -92,6 +111,11 @@ const initialState: AppState = {
   chipDeviceId: null,
   messages: [],
   composerText: null,
+  qrPairing: null,
+  link: null,
+  linkArmed: false,
+  linkStaged: [],
+  preview: null,
 };
 
 export type Action =
@@ -120,7 +144,15 @@ export type Action =
   | { type: "dismiss-message"; messageId: string }
   | { type: "open-composer"; text: string }
   | { type: "close-composer" }
-  | { type: "dismiss-pairing" };
+  | { type: "dismiss-pairing" }
+  | { type: "set-qr-pairing"; qr: QrPairing | null }
+  | { type: "set-link"; link: LinkSession | null }
+  | { type: "arm-link"; armed: boolean }
+  | { type: "stage-link-files"; paths: string[] }
+  | { type: "unstage-link-file"; path: string }
+  | { type: "clear-link-staged" }
+  | { type: "open-preview"; target: PreviewTarget }
+  | { type: "close-preview" };
 
 function upsertTransfer(
   queue: TransferSummary[],
@@ -162,18 +194,29 @@ function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
           code: ev.code,
           deviceName: ev.deviceName,
         },
+        // `start_qr_pairing` emits this event too; the QR payload it returned
+        // is stored by the caller and must survive its own event.
+        qrPairing:
+          state.qrPairing && state.qrPairing.pairingId === ev.pairingId
+            ? state.qrPairing
+            : null,
       };
     case "pairingCompleted": {
       const others = state.devices.filter(
         (d) => d.deviceId !== ev.device.deviceId,
       );
-      return { ...state, pairing: null, devices: [ev.device, ...others] };
+      return {
+        ...state,
+        pairing: null,
+        qrPairing: null,
+        devices: [ev.device, ...others],
+      };
     }
     case "pairingFailed":
       if (state.pairing && state.pairing.pairingId !== ev.pairingId) {
         return state;
       }
-      return { ...state, pairing: null };
+      return { ...state, pairing: null, qrPairing: null };
     case "transferUpdated":
       return {
         ...state,
@@ -213,6 +256,14 @@ function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
         messages: [message, ...state.messages].slice(0, MAX_MESSAGE_CARDS),
       };
     }
+    case "linkSessionChanged":
+      // The core is authoritative: a session that expired on its own comes
+      // through here as `null`, which collapses the panel back to composing.
+      return { ...state, link: ev.session };
+    case "guestUpload":
+      // The counter itself rides on `linkSessionChanged`; the upload also
+      // shows up in the queue as "Guest (link)". Nothing to fold in here.
+      return state;
     case "serverStarted":
       return state.info
         ? { ...state, info: { ...state.info, apiPort: ev.port } }
@@ -276,7 +327,34 @@ function reducer(state: AppState, action: Action): AppState {
     case "close-composer":
       return { ...state, composerText: null };
     case "dismiss-pairing":
-      return { ...state, pairing: null };
+      return { ...state, pairing: null, qrPairing: null };
+    case "set-qr-pairing":
+      return { ...state, qrPairing: action.qr };
+    case "set-link":
+      return { ...state, link: action.link };
+    case "arm-link":
+      return {
+        ...state,
+        linkArmed: action.armed,
+        linkStaged: action.armed ? state.linkStaged : [],
+      };
+    case "stage-link-files": {
+      const seen = new Set(state.linkStaged);
+      const added = action.paths.filter((p) => !seen.has(p));
+      if (added.length === 0) return state;
+      return { ...state, linkStaged: [...state.linkStaged, ...added] };
+    }
+    case "unstage-link-file":
+      return {
+        ...state,
+        linkStaged: state.linkStaged.filter((p) => p !== action.path),
+      };
+    case "clear-link-staged":
+      return { ...state, linkStaged: [] };
+    case "open-preview":
+      return { ...state, preview: action.target };
+    case "close-preview":
+      return { ...state, preview: null };
   }
 }
 
@@ -292,7 +370,7 @@ export function useAppDispatch(): Dispatch<Action> {
 }
 
 async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
-  const [info, settings, devices, queue, history, folders, messages] =
+  const [info, settings, devices, queue, history, folders, messages, link] =
     await Promise.all([
       api.getInfo(),
       api.getSettings(),
@@ -303,6 +381,9 @@ async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
       // Messages that arrived before the webview subscribed (e.g. after a
       // reload). Core keeps them in RAM; oldest first → newest first here.
       api.incomingMessages(),
+      // A webview reload must not lose sight of a running guest session —
+      // the core still holds it (only an app restart kills it).
+      api.linkSession(),
     ]);
   dispatch({
     type: "snapshots",
@@ -314,6 +395,7 @@ async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
     watchFolders: folders,
   });
   dispatch({ type: "set-messages", messages: messages.slice().reverse() });
+  dispatch({ type: "set-link", link });
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {

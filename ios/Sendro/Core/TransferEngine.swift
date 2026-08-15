@@ -101,6 +101,8 @@ final class TransferEngine: ObservableObject {
     private let discovery: DiscoveryService
     /// In-RAM only (§11). The engine never persists anything it routes here.
     private let messages: MessageCenter
+    /// Local notifications (best-effort, foreground/briefly-backgrounded).
+    private let notifier: Notifier
 
     private var pollTasks: [String: Task<Void, Never>] = [:]
     private var downloads: [String: DownloadTask] = [:]
@@ -114,13 +116,15 @@ final class TransferEngine: ObservableObject {
                      history: HistoryStore,
                      fileStore: FileStore,
                      discovery: DiscoveryService,
-                     messages: MessageCenter) {
+                     messages: MessageCenter,
+                     notifier: Notifier) {
         self.settings = settings
         self.paired = paired
         self.history = history
         self.fileStore = fileStore
         self.discovery = discovery
         self.messages = messages
+        self.notifier = notifier
     }
 
     // MARK: Lifecycle
@@ -128,6 +132,8 @@ final class TransferEngine: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // A force-quit can leave a Live Activity orphaned on the Lock Screen.
+        LiveActivityController.shared.endStaleActivities()
         restoreInflight()
         paired.$hosts
             .receive(on: DispatchQueue.main)
@@ -158,6 +164,23 @@ final class TransferEngine: ObservableObject {
         // last pre-suspension failure (or success).
         hostOnline.removeAll()
         reconcileLoops()   // spawns fresh loops (backoff starts at zero)
+    }
+
+    /// Call when NWPathMonitor reports a different network (joining the PC's
+    /// Mobile Hotspot, turning on Personal Hotspot, switching Wi-Fi).
+    ///
+    /// The old poll sockets belong to the old interface and the backoff timer
+    /// may be parked for up to 15 s, so every loop is torn down and respawned:
+    /// each paired host — discovered, manually typed or QR-scanned — is
+    /// re-pinged immediately at its stored address. A host is never
+    /// permanently written off; the loop keeps retrying forever, and discovery
+    /// updates the endpoint if the same PC reappears on the new subnet.
+    func networkChanged() {
+        guard started else { return }
+        for task in pollTasks.values { task.cancel() }
+        pollTasks.removeAll()
+        hostOnline.removeAll()
+        reconcileLoops()
     }
 
     // MARK: Pairing management
@@ -326,6 +349,9 @@ final class TransferEngine: ObservableObject {
         try? FileManager.default.removeItem(at: Self.stagedImportURL(for: transfer.offer))
         removeRecord(transferId)
         active.remove(at: idx)
+        LiveActivityController.shared.end(transferId: transferId,
+                                          phase: .failed,
+                                          bytesReceived: transfer.bytesReceived)
         sendStatus(transfer.hostId, transferId, StatusReport(state: "cancelled"))
         history.add(transferId: transferId,
                     fileName: transfer.offer.fileName,
@@ -441,13 +467,27 @@ final class TransferEngine: ObservableObject {
                 if Task.isCancelled { break }
                 markOnline(hostId, true)
                 backoffSeconds = 0
+                var arrived: [TransferOffer] = []
                 for offer in response.offers {
-                    handleOffer(offer, hostId: hostId)
+                    if handleOffer(offer, hostId: hostId) {
+                        arrived.append(offer)
+                    }
+                }
+                if !arrived.isEmpty {
+                    // One notification per poll batch, not per file.
+                    let senderName = arrived.first?.senderName
+                        ?? paired.host(id: hostId)?.name
+                        ?? "Your PC"
+                    notifier.notifyIncomingOffers(count: arrived.count, senderName: senderName)
                 }
                 // §11.1 — messages ride the same poll. Straight into RAM,
                 // never touched again by this loop.
                 if let delivered = response.messages, !delivered.isEmpty {
                     messages.receive(delivered)
+                    if let newest = delivered.last {
+                        // Privacy: only the sender's name leaves this line.
+                        notifier.notifyMessage(senderName: newest.senderName)
+                    }
                 }
                 resumeInterrupted(hostId: hostId)
             } catch {
@@ -473,18 +513,23 @@ final class TransferEngine: ObservableObject {
         }
     }
 
-    private func handleOffer(_ offer: TransferOffer, hostId: String) {
+    /// - Returns: true when this offer is newly waiting for the user (an
+    ///   auto-accepted offer returns false — it notifies on completion, not
+    ///   on arrival).
+    @discardableResult
+    private func handleOffer(_ offer: TransferOffer, hostId: String) -> Bool {
         let id = offer.transferId
         guard !processedOfferIds.contains(id),
               !incomingOffers.contains(where: { $0.id == id }),
-              !active.contains(where: { $0.id == id }) else { return }
+              !active.contains(where: { $0.id == id }) else { return false }
 
         if offer.autoAccept && settings.autoAcceptFromTrusted {
             processedOfferIds.insert(id)
             Task { await self.acceptAndStart(offer: offer, hostId: hostId) }
-        } else {
-            incomingOffers.append(IncomingOffer(offer: offer, hostId: hostId, receivedAt: Date()))
+            return false
         }
+        incomingOffers.append(IncomingOffer(offer: offer, hostId: hostId, receivedAt: Date()))
+        return true
     }
 
     private func resumeInterrupted(hostId: String) {
@@ -536,6 +581,13 @@ final class TransferEngine: ObservableObject {
 
         upsertActive(offer: offer, hostId: hostId, phase: .preparing)
 
+        // Dynamic Island / Lock Screen for big ones only (≥ 200 MB). A no-op
+        // below iOS 16.1 or when the user disabled Live Activities.
+        LiveActivityController.shared.start(transferId: transferId,
+                                            fileName: offer.fileName,
+                                            totalBytes: offer.sizeBytes,
+                                            senderName: offer.senderName)
+
         let partURL = AppPaths.partFileURL(transferId: transferId)
         let sha256 = offer.sha256
         let download = DownloadTask(offer: offer, partURL: partURL) { rangeStart in
@@ -567,6 +619,12 @@ final class TransferEngine: ObservableObject {
                 guard let self else { return }
                 self.setPhase(transferId, .verifying)
                 self.sendStatus(hostId, transferId, StatusReport(state: "verifying"))
+                LiveActivityController.shared.update(transferId: transferId,
+                                                     phase: .verifying,
+                                                     bytesReceived: offer.sizeBytes,
+                                                     speedBytesPerSecond: 0,
+                                                     etaSeconds: nil,
+                                                     force: true)
             }
         }
         download.onCompletion = { [weak self] outcome in
@@ -607,10 +665,18 @@ final class TransferEngine: ObservableObject {
                         senderName: offer.senderName,
                         outcome: "failed",
                         errorMessage: "integrity")
+            LiveActivityController.shared.end(transferId: transferId,
+                                              phase: .failed,
+                                              bytesReceived: 0)
+            notifier.notifyTransferFailed(fileName: offer.fileName, reason: "integrity check")
 
         case .failed(let message, let resumable):
             sendStatus(hostId, transferId, StatusReport(state: "failed", error: message))
             setPhase(transferId, .failed(message: message, resumable: resumable))
+            LiveActivityController.shared.end(transferId: transferId,
+                                              phase: .failed,
+                                              bytesReceived: activeBytes(transferId))
+            notifier.notifyTransferFailed(fileName: offer.fileName, reason: message)
 
         case .cancelled:
             try? FileManager.default.removeItem(at: AppPaths.partFileURL(transferId: transferId))
@@ -623,7 +689,14 @@ final class TransferEngine: ObservableObject {
                         sizeBytes: offer.sizeBytes,
                         senderName: offer.senderName,
                         outcome: "cancelled")
+            LiveActivityController.shared.end(transferId: transferId,
+                                              phase: .failed,
+                                              bytesReceived: 0)
         }
+    }
+
+    private func activeBytes(_ transferId: String) -> Int64 {
+        active.first { $0.id == transferId }?.bytesReceived ?? 0
     }
 
     // MARK: - Save routing
@@ -650,6 +723,12 @@ final class TransferEngine: ObservableObject {
                               fileURL: URL, kind: MediaKind) async {
         setPhase(offer.transferId, .saving)
         sendStatus(hostId, offer.transferId, StatusReport(state: "saving"))
+        LiveActivityController.shared.update(transferId: offer.transferId,
+                                             phase: .saving,
+                                             bytesReceived: offer.sizeBytes,
+                                             speedBytesPerSecond: 0,
+                                             etaSeconds: nil,
+                                             force: true)
         let keepCopy = !settings.deleteTempAfterImport
 
         // PhotoKit infers the asset's type from the source URL's file
@@ -670,15 +749,22 @@ final class TransferEngine: ObservableObject {
         }
 
         do {
-            try await MediaImporter.importToPhotos(fileURL: importURL,
-                                                   kind: kind,
-                                                   originalFilename: offer.fileName,
-                                                   moveFile: !keepCopy,
-                                                   addToAlbum: settings.addToSendroAlbum)
+            let assetId = try await MediaImporter.importToPhotos(fileURL: importURL,
+                                                                 kind: kind,
+                                                                 originalFilename: offer.fileName,
+                                                                 moveFile: !keepCopy,
+                                                                 addToAlbum: settings.addToSendroAlbum)
+            // With "Delete Temp After Import" ON the bytes are now ONLY in
+            // Photos — that is exactly why the asset id is recorded: the
+            // Library row has to preview from the library, not from a file
+            // that no longer exists.
+            var keptName: String?
             if keepCopy {
-                try? fileStore.moveIn(from: importURL, preferredName: offer.fileName)
+                keptName = (try? fileStore.moveIn(from: importURL,
+                                                  preferredName: offer.fileName))?.lastPathComponent
             }
-            finishCompleted(offer: offer, hostId: hostId, savedTo: "photos")
+            finishCompleted(offer: offer, hostId: hostId, savedTo: "photos",
+                            localName: keptName, photoAssetId: assetId)
         } catch MediaImportError.notAuthorized {
             // Surface it instead of silently rerouting to Files — the user
             // expects media in their gallery. Bytes stay staged for retry
@@ -690,8 +776,9 @@ final class TransferEngine: ObservableObject {
             // Any other import failure: never lose verified bytes — fall
             // back to the Files store.
             do {
-                try fileStore.moveIn(from: importURL, preferredName: offer.fileName)
-                finishCompleted(offer: offer, hostId: hostId, savedTo: "files")
+                let saved = try fileStore.moveIn(from: importURL, preferredName: offer.fileName)
+                finishCompleted(offer: offer, hostId: hostId, savedTo: "files",
+                                localName: saved.lastPathComponent)
             } catch {
                 sendStatus(hostId, offer.transferId,
                            StatusReport(state: "failed", error: "save failed: \(error.localizedDescription)"))
@@ -742,9 +829,16 @@ final class TransferEngine: ObservableObject {
     private func saveToFilesStore(offer: TransferOffer, hostId: String, fileURL: URL) {
         setPhase(offer.transferId, .saving)
         sendStatus(hostId, offer.transferId, StatusReport(state: "saving"))
+        LiveActivityController.shared.update(transferId: offer.transferId,
+                                             phase: .saving,
+                                             bytesReceived: offer.sizeBytes,
+                                             speedBytesPerSecond: 0,
+                                             etaSeconds: nil,
+                                             force: true)
         do {
-            try fileStore.moveIn(from: fileURL, preferredName: offer.fileName)
-            finishCompleted(offer: offer, hostId: hostId, savedTo: "files")
+            let saved = try fileStore.moveIn(from: fileURL, preferredName: offer.fileName)
+            finishCompleted(offer: offer, hostId: hostId, savedTo: "files",
+                            localName: saved.lastPathComponent)
         } catch {
             sendStatus(hostId, offer.transferId,
                        StatusReport(state: "failed", error: "save failed: \(error.localizedDescription)"))
@@ -753,7 +847,11 @@ final class TransferEngine: ObservableObject {
         }
     }
 
-    private func finishCompleted(offer: TransferOffer, hostId: String, savedTo: String) {
+    private func finishCompleted(offer: TransferOffer,
+                                 hostId: String,
+                                 savedTo: String,
+                                 localName: String? = nil,
+                                 photoAssetId: String? = nil) {
         sendStatus(hostId, offer.transferId,
                    StatusReport(state: "completed", bytesReceived: offer.sizeBytes, savedTo: savedTo))
         history.add(transferId: offer.transferId,
@@ -761,9 +859,15 @@ final class TransferEngine: ObservableObject {
                     sizeBytes: offer.sizeBytes,
                     senderName: offer.senderName,
                     outcome: "completed",
-                    savedTo: savedTo)
+                    savedTo: savedTo,
+                    localName: localName,
+                    photoAssetId: photoAssetId)
         removeRecord(offer.transferId)
         active.removeAll { $0.id == offer.transferId }
+        LiveActivityController.shared.end(transferId: offer.transferId,
+                                          phase: .completed,
+                                          bytesReceived: offer.sizeBytes)
+        notifier.notifyTransferFinished(fileName: offer.fileName, savedTo: savedTo)
         updateIdleTimer()
     }
 
@@ -801,6 +905,12 @@ final class TransferEngine: ObservableObject {
         active[idx].bytesReceived = update.bytesReceived
         active[idx].speedBytesPerSecond = update.speedBytesPerSecond
         active[idx].etaSeconds = update.etaSeconds
+        // Throttled to ≤1/s inside the controller — this fires 4×/s.
+        LiveActivityController.shared.update(transferId: transferId,
+                                             phase: .downloading,
+                                             bytesReceived: update.bytesReceived,
+                                             speedBytesPerSecond: update.speedBytesPerSecond,
+                                             etaSeconds: update.etaSeconds)
     }
 
     private func updateIdleTimer() {

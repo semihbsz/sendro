@@ -14,7 +14,8 @@ import {
   IconCheck,
   IconFlow,
 } from "../icons";
-import { EmptyState } from "../components/common";
+import { EmptyState, FileName } from "../components/common";
+import { targetForHistory, targetForTransfer } from "../preview";
 import { TransferCard, CANCELABLE, RETRYABLE } from "../components/TransferCard";
 import { PhasePill, ProgressRing, Sparkline, ringFraction } from "../components/transfer";
 import { isTerminal, type HistoryEntry, type TransferSummary } from "../types";
@@ -40,7 +41,7 @@ function hashLine(t: TransferSummary): string {
 
 /** The big ring hero for the primary in-flight transfer. */
 function FlowHero({ t }: { t: TransferSummary }) {
-  const { paused, speedSamples } = useAppState();
+  const { paused, speedSamples, settings } = useAppState();
   const frac = ringFraction(t);
   const pct = Math.round(frac * 100);
   const moving = t.state === "transferring" && !paused;
@@ -75,9 +76,11 @@ function FlowHero({ t }: { t: TransferSummary }) {
         </div>
         <div className="flow-hero-main">
           <div className="flow-hero-title-row">
-            <div className="flow-hero-name" title={t.fileName}>
-              {t.fileName}
-            </div>
+            <FileName
+              className="flow-hero-name"
+              label={t.fileName}
+              target={targetForTransfer(t, settings?.receiveDir ?? null)}
+            />
             <PhasePill t={t} paused={paused} />
           </div>
           <div className="flow-hash">{hashLine(t)}</div>
@@ -132,7 +135,7 @@ function VerifiedCell({ h }: { h: HistoryEntry }) {
 }
 
 export function Flow() {
-  const { queue, history, paused } = useAppState();
+  const { queue, history, paused, settings } = useAppState();
   const dispatch = useAppDispatch();
   const [retryingAll, setRetryingAll] = useState(false);
 
@@ -302,9 +305,15 @@ export function Flow() {
                   ) : (
                     <IconArrowDown size={14} />
                   )}
-                  <span className="col-file-name" title={h.fileName}>
-                    {h.fileName}
-                  </span>
+                  <FileName
+                    className="col-file-name"
+                    label={h.fileName}
+                    target={targetForHistory(
+                      h,
+                      queue,
+                      settings?.receiveDir ?? null,
+                    )}
+                  />
                 </div>
                 <div className="col-peer">{h.peerName}</div>
                 <div className="col-size">{formatBytes(h.sizeBytes)}</div>

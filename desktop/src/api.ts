@@ -8,7 +8,13 @@ import type {
   HistoryEntry,
   HostInfo,
   IncomingMessage,
+  LinkOptions,
+  LinkSession,
+  NetIface,
+  PreviewInfo,
+  QrPairing,
   Settings,
+  TextPreview,
   TransferSummary,
   TrustedDevice,
   WatchFolderConfig,
@@ -68,3 +74,58 @@ export const clearMessages = () => invoke<void>("clear_messages");
  */
 export const pasteClipboardImage = (stamp: string) =>
   invoke<string | null>("paste_clipboard_image", { stamp });
+
+/* -- QR pairing (PROTOCOL.md §13) -- */
+
+/**
+ * Opens a pairing session for QR display. Same machinery as the typed code
+ * (same 120 s expiry, same attempt limits) — it also raises the usual
+ * `pairingStarted` event, so the 6-digit fallback stays on screen.
+ */
+export const startQrPairing = () => invoke<QrPairing>("start_qr_pairing");
+
+/* -- Sendro Link (PROTOCOL.md §14) — RAM only, one session at a time -- */
+
+export const startLinkSession = (opts: LinkOptions) =>
+  invoke<LinkSession>("start_link_session", { opts });
+export const stopLinkSession = () => invoke<boolean>("stop_link_session");
+export const linkSession = () => invoke<LinkSession | null>("link_session");
+export const addLinkFiles = (paths: string[]) =>
+  invoke<LinkSession>("add_link_files", { paths });
+export const removeLinkFile = (fileId: string) =>
+  invoke<boolean>("remove_link_file", { fileId });
+
+/* -- Network surface, for the hotspot / no-router screen -- */
+
+export const networkInterfaces = () => invoke<NetIface[]>("network_interfaces");
+
+/* -- File preview --
+ *
+ * `previewFile` is also the *only* thing that ever widens the asset-protocol
+ * scope: Rust validates the path against the receive folder plus the set of
+ * files the user explicitly sent/shared this session, and only then lets the
+ * webview stream it. A refusal comes back as a rejected promise.
+ */
+
+export const previewFile = (path: string) =>
+  invoke<PreviewInfo>("preview_file", { path });
+
+/** Bounded UTF-8 prefix of a text file — never the whole thing. */
+export const readTextPreview = (path: string, maxBytes?: number) =>
+  invoke<TextPreview>("read_text_preview", { path, maxBytes });
+
+/**
+ * "Open in default app" / "Show in folder".
+ *
+ * These go through Rust rather than the opener plugin's JS commands on
+ * purpose: `open_path` from the webview is gated by an ACL *path* scope, and
+ * the only scope that would cover arbitrary user files is a blanket one.
+ * The Rust side applies the same per-file check the preview does.
+ */
+export const openPreviewedFile = (path: string) =>
+  invoke<void>("open_previewed_file", { path });
+export const revealPreviewedFile = (path: string) =>
+  invoke<void>("reveal_previewed_file", { path });
+
+/** Show, restore and focus the main window. */
+export const showWindow = () => invoke<void>("show_window");

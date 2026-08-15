@@ -306,3 +306,78 @@ Accepting many offers is a client-side loop over §6.3
 partial failure only affects the individual transfer. Clients that expose
 an "Accept all" affordance must issue the calls with bounded concurrency
 (≤4 in flight) and report per-item failures without aborting the rest.
+
+## 13. QR pairing (optical channel)
+
+Typing six digits is optional: the host can render the *same* pairing
+session as a QR code. The code travels over the optical channel (your own
+screen → your own camera), never over the network, so §4's security
+property is preserved — scanning proves physical presence exactly like
+typing does.
+
+The host opens a normal §4.1 pairing session, then encodes:
+
+```
+sendro://pair?v=1&h=<host-ip>&p=<port>&id=<hostDeviceId>&n=<pct-encoded name>
+             &pid=<pairingId>&s=<salt base64url>&c=<6-digit code>
+```
+
+- Every value is percent-encoded. `n` is the host's display name.
+- `h` must be a routable LAN address of the host. When the host has several
+  (Ethernet + Wi-Fi + hotspot), it renders one QR per address, or lets the
+  user flip between them; the client may also fall back to mDNS using `id`.
+- The QR is only valid for the session's 120 s lifetime. Re-rendering after
+  expiry starts a fresh session.
+
+Client flow: scan → parse → verify `v` == 1 → `GET /api/v1/info` at `h:p`
+(sanity-check `app == "sendro"`, matching `deviceId`, protocol version) →
+compute the §4.2 proof from `c`, `s`, `pid` → `POST /api/v1/pair/confirm`.
+No new endpoints. A `sendro://pair?…` URL opened from the iOS Camera app or
+any QR reader must drive the same flow via the app's URL handler.
+
+Hosts must treat a scanned session exactly like a typed one (same attempt
+limits, same expiry). Clients must refuse `sendro://` URLs that arrive from
+anywhere except a QR scan or an OS URL open — never from page content.
+
+## 14. Sendro Link (guest web session)
+
+For someone on the same Wi-Fi who does not have Sendro installed, the host
+can open a **temporary, unauthenticated-by-URL web session**: a small page
+served by the host itself, addressed by an unguessable token. No cloud, no
+account, still LAN-only.
+
+The user starts it explicitly from the PC UI, picks a duration, and can
+stop it at any time. Everything about it is opt-in and ephemeral.
+
+### 14.1 Session
+
+- `linkToken`: 24 random bytes, base64url (32 chars). Unguessable; it *is*
+  the credential, so the URL must only be shared deliberately (QR/AirDrop).
+- Fields: `expiresAtMs` (default 30 min, max 24 h), `allowUpload` (bool),
+  `sharedFiles` (explicit list — the guest can never browse the PC).
+- Base URL: `http://<host-ip>:<port>/link/<linkToken>/`
+- Expiry or an explicit stop makes every route below return `410 gone`.
+  A stopped/expired token is never reused.
+
+### 14.2 Guest routes (no Bearer auth; the token in the path is the key)
+
+| route | purpose |
+|---|---|
+| `GET /link/<t>/` | the guest page (self-contained HTML+CSS+JS, no CDN, works offline) |
+| `GET /link/<t>/api/session` | `{ "hostName": "...", "expiresAtMs": …, "allowUpload": true, "files": [ {fileId, fileName, sizeBytes, mimeType, sha256} ] }` |
+| `GET /link/<t>/api/file/<fileId>` | bytes; identical semantics to §6.4 (identity encoding, `Accept-Ranges`, `Content-Disposition` RFC5987, ETag = sha256) |
+| `POST /link/<t>/api/upload` | raw body, `X-Sendro-File-Name` (RFC5987), optional `X-Sendro-Sha256`; only when `allowUpload`; lands in the receive folder like §7 |
+
+Guest uploads appear in the host's queue/history marked as coming from
+`Guest (link)`. Rate limits: max 8 concurrent guest connections, max 200
+uploads per session.
+
+### 14.3 Safety rules (mandatory)
+
+- Only files the user explicitly added to the session are reachable; there
+  is no directory listing and no path traversal (fileId → path lookup only).
+- The token appears in the URL, so the guest page must not embed it in any
+  outbound link, and the host must not log full URLs.
+- The session is RAM-only: it never survives an app restart.
+- Starting a link session requires an explicit user action in the PC UI;
+  it is never started by a request from the network.

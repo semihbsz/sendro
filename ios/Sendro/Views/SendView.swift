@@ -18,6 +18,9 @@ struct SendView: View {
     @EnvironmentObject private var uploader: UploadEngine
     @EnvironmentObject private var pairedHosts: PairedHostStore
     @EnvironmentObject private var engine: TransferEngine
+    /// Files iOS handed us through "Copy to Sendro" / Open In. They wait here
+    /// until the user taps Send — nothing is ever sent automatically.
+    @EnvironmentObject private var tray: SendTray
 
     /// Owned by RootView so the choice survives tab switches.
     @Binding var targetHostId: String?
@@ -78,6 +81,11 @@ struct SendView: View {
                                    tint: Theme.warn,
                                    actionTitle: nil,
                                    action: nil)
+                            .padding(.top, 20)
+                    }
+
+                    if !tray.isEmpty {
+                        trayCard
                             .padding(.top, 20)
                     }
 
@@ -190,6 +198,87 @@ struct SendView: View {
             .buttonStyle(PressableButtonStyle())
             .accessibilityLabel("Target computer")
         }
+    }
+
+    // MARK: Shared-in files ("Copy to Sendro")
+
+    /// Queued and ready, never auto-sent: the user picks the moment.
+    private var trayCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.irisBright)
+                Text(tray.items.count == 1
+                     ? "1 file shared with Sendro"
+                     : "\(tray.items.count) files shared with Sendro")
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                Text(ByteFormat.string(tray.totalBytes))
+                    .font(Theme.mono(10.5))
+                    .foregroundColor(Theme.textTertiary)
+                    .lineLimit(1)
+            }
+
+            VStack(spacing: 7) {
+                ForEach(tray.items) { item in
+                    HStack(spacing: 10) {
+                        FileBadge(fileName: item.name, side: 30, cornerRadius: 9)
+                        Text(item.name)
+                            .font(Theme.sans(13))
+                            .foregroundColor(Theme.textBase.opacity(0.9))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Button {
+                            tray.remove(id: item.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(Theme.textBase.opacity(0.5))
+                                .frame(width: 26, height: 26)
+                        }
+                        .buttonStyle(PressableButtonStyle())
+                        .accessibilityLabel("Remove \(item.name)")
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    sendTray()
+                } label: {
+                    AccentPillLabel(title: canSend
+                                    ? "Send to \(targetHost?.name ?? "PC")"
+                                    : "No PC online",
+                                    height: 46)
+                }
+                .buttonStyle(PressableButtonStyle())
+                .disabled(!canSend)
+                .opacity(canSend ? 1 : 0.5)
+
+                Button {
+                    tray.clear()
+                } label: {
+                    GhostPillLabel(title: "Clear", height: 46)
+                }
+                .buttonStyle(PressableButtonStyle())
+                .frame(maxWidth: 108)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard(cornerRadius: 24)
+    }
+
+    private func sendTray() {
+        guard let host = targetHost else { return }
+        let urls = tray.takeAll()
+        guard !urls.isEmpty else { return }
+        uploader.enqueue(fileURLs: urls, hostId: host.deviceId, hostName: host.name)
     }
 
     // MARK: Actions

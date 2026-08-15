@@ -6,6 +6,14 @@ import * as api from "../api";
 import { formatDate, formatRelative, isOnline } from "../format";
 import { IconPhone, IconWifi } from "../icons";
 import { Toggle } from "../components/common";
+import { ConnectionCard } from "../components/ConnectionCard";
+import { usePrefs } from "../prefs";
+import {
+  ensurePermission,
+  permissionGranted,
+  resetPermission,
+  NOTIFY_CATEGORIES,
+} from "../notify";
 import type { Settings } from "../types";
 
 /** Trusted devices — folded into Settings in the new IA (the rail has no
@@ -13,6 +21,18 @@ import type { Settings } from "../types";
 function DevicesSection() {
   const { devices } = useAppState();
   const dispatch = useAppDispatch();
+  const [pairError, setPairError] = useState<string | null>(null);
+
+  /** §13: opens a real pairing session and shows it as a QR in the modal. */
+  const showQr = async () => {
+    setPairError(null);
+    try {
+      const qr = await api.startQrPairing();
+      dispatch({ type: "set-qr-pairing", qr });
+    } catch (err) {
+      setPairError(String(err));
+    }
+  };
 
   const revoke = async (deviceId: string) => {
     try {
@@ -26,7 +46,14 @@ function DevicesSection() {
 
   return (
     <div className="settings-section">
-      <span className="strip-label">Devices</span>
+      <div className="settings-section-head">
+        <span className="strip-label">Devices</span>
+        <span className="finished-head-spacer" />
+        <button className="btn-glass btn-sm" onClick={() => void showQr()}>
+          Pair with a QR code
+        </button>
+      </div>
+      {pairError ? <div className="error-note">{pairError}</div> : null}
       <div className="settings-panel">
         {devices.length === 0 ? (
           <div className="device-row">
@@ -89,8 +116,77 @@ function DevicesSection() {
               <li>Tap this PC when it appears under nearby devices.</li>
               <li>Type the 6-digit code that pops up on this screen.</li>
             </ol>
+            Or skip all that: hit “Pair with a QR code” and point the iPhone's
+            camera at the screen. Same session, same 2-minute expiry — the
+            code only ever travels from your screen to your camera.
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Windows toast notifications — per-category, remembered on this PC. */
+function NotificationsSection() {
+  const [prefs, setPrefs] = usePrefs();
+  const [granted, setGranted] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    permissionGranted().then(setGranted).catch(() => setGranted(false));
+  }, []);
+
+  const ask = async () => {
+    resetPermission();
+    const ok = await ensurePermission();
+    setGranted(ok);
+  };
+
+  return (
+    <div className="settings-section">
+      <span className="strip-label">Notifications</span>
+      <div className="settings-panel">
+        <div className="settings-row">
+          <div>
+            <div className="field-label">Windows notifications</div>
+            <div className="field-hint">
+              Sendro stays quiet while you're looking at the relevant screen —
+              you only get a toast when the window is behind something or in
+              the tray.
+            </div>
+          </div>
+          <div className="settings-control">
+            {granted === false ? (
+              <button className="btn-glass btn-sm" onClick={() => void ask()}>
+                Allow notifications
+              </button>
+            ) : null}
+            <Toggle
+              on={prefs.enabled}
+              label="Windows notifications"
+              onChange={(on) => setPrefs({ ...prefs, enabled: on })}
+            />
+          </div>
+        </div>
+
+        {NOTIFY_CATEGORIES.map((c) => (
+          <div className="settings-row" key={c.key}>
+            <div>
+              <div className="field-label">{c.label}</div>
+              <div className="field-hint">{c.hint}</div>
+            </div>
+            <Toggle
+              on={prefs.categories[c.key]}
+              disabled={!prefs.enabled}
+              label={c.label}
+              onChange={(on) =>
+                setPrefs({
+                  ...prefs,
+                  categories: { ...prefs.categories, [c.key]: on },
+                })
+              }
+            />
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -184,6 +280,10 @@ export function SettingsView() {
       {error ? <div className="error-note">{error}</div> : null}
 
       <DevicesSection />
+
+      <ConnectionCard />
+
+      <NotificationsSection />
 
       <div className="settings-section">
         <span className="strip-label">General</span>

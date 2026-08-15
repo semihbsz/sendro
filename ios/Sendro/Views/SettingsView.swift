@@ -30,6 +30,12 @@ struct SettingsView: View {
     @AppStorage(Settings.Keys.addToSendroAlbum)
     private var addToSendroAlbum = true
 
+    @AppStorage(Settings.Keys.notifyTransfers)
+    private var notifyTransfers = true
+
+    @AppStorage(Settings.Keys.notifyMessages)
+    private var notifyMessages = true
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -58,6 +64,40 @@ struct SettingsView: View {
                                 .tint(Theme.iris)
                             }
                             caption("Only applies to offers your PC flags as auto-send (watch-folder rules). Everything else always asks.")
+                        }
+
+                        section(tag: "Notifications") {
+                            settingCard {
+                                VStack(spacing: 16) {
+                                    Toggle(isOn: $notifyTransfers) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("Transfers")
+                                                .font(Theme.sans(15))
+                                                .foregroundColor(Theme.textPrimary)
+                                            Text("Files offered, saved or failed")
+                                                .font(Theme.mono(10.5))
+                                                .foregroundColor(Theme.textTertiary)
+                                        }
+                                    }
+                                    .tint(Theme.iris)
+
+                                    Divider()
+                                        .overlay(Color.white.opacity(0.08))
+
+                                    Toggle(isOn: $notifyMessages) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("Messages")
+                                                .font(Theme.sans(15))
+                                                .foregroundColor(Theme.textPrimary)
+                                            Text("Sender only — never the text")
+                                                .font(Theme.mono(10.5))
+                                                .foregroundColor(Theme.textTertiary)
+                                        }
+                                    }
+                                    .tint(Theme.iris)
+                                }
+                            }
+                            caption("Local notifications only — there is no Sendro server and nothing leaves your network. They fire while Sendro is running or briefly backgrounded; iOS suspends apps after a while, so this can't be a guarantee. Message notifications never contain the message text.")
                         }
 
                         section(tag: "Photos & Videos") {
@@ -228,44 +268,15 @@ struct SettingsView: View {
 
 // MARK: - Network diagnostics
 
-private final class PathMonitorModel: ObservableObject {
-
-    @Published var isConnected = false
-    @Published var isWifi = false
-    @Published var statusText = "Checking…"
-
-    private let monitor = NWPathMonitor()
-
-    init() {
-        monitor.pathUpdateHandler = { [weak self] path in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.isConnected = path.status == .satisfied
-                self.isWifi = path.usesInterfaceType(.wifi)
-                if path.status == .satisfied {
-                    self.statusText = path.usesInterfaceType(.wifi)
-                        ? "Connected via Wi-Fi"
-                        : "Connected (not Wi-Fi)"
-                } else {
-                    self.statusText = "No network connection"
-                }
-            }
-        }
-        monitor.start(queue: DispatchQueue(label: "sendro.pathmonitor"))
-    }
-
-    deinit {
-        monitor.cancel()
-    }
-}
-
 struct NetworkDiagnosticsView: View {
 
     @EnvironmentObject private var engine: TransferEngine
     @EnvironmentObject private var discovery: DiscoveryService
     @EnvironmentObject private var pairedHosts: PairedHostStore
+    /// One shared NWPathMonitor for the whole app (Core/NetworkWatcher.swift)
+    /// — the same instance that drives discovery restarts on a hotspot switch.
+    @EnvironmentObject private var pathMonitor: NetworkWatcher
 
-    @StateObject private var pathMonitor = PathMonitorModel()
     @State private var pingResults: [String: String] = [:]
     @State private var testing = false
 
@@ -288,13 +299,15 @@ struct NetworkDiagnosticsView: View {
                                         .foregroundColor(Theme.textPrimary)
                                 }
                                 if pathMonitor.isConnected && !pathMonitor.isWifi {
-                                    Text("Sendro needs your iPhone and PC on the same Wi-Fi network.")
+                                    Text("Sendro needs your iPhone and PC on the same local network — normally Wi-Fi, but a hotspot works too (see below).")
                                         .font(Theme.sans(12.5))
                                         .foregroundColor(Theme.warn)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
                         }
+
+                        HotspotHelpCard(initiallyExpanded: true)
                     }
 
                     diagSection(tag: "Local Network Permission") {

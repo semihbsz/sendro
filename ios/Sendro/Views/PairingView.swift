@@ -19,6 +19,7 @@ struct PairingPane: View {
 
     @EnvironmentObject private var settings: Settings
     @EnvironmentObject private var pairedHosts: PairedHostStore
+    @EnvironmentObject private var notifier: Notifier
 
     private enum Stage: Equatable {
         case starting
@@ -109,8 +110,14 @@ struct PairingPane: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 16)
 
+                    // BOTTOM SPACING: the keypad used to end flush against
+                    // the screen edge. This 16pt sits on top of the sheet's
+                    // 24pt safe-area inset (DevicesSheet) and the home
+                    // indicator inset, so the last row always has room, and
+                    // the whole pane stays scrollable on an SE-class screen.
                     keypad
                         .padding(.top, 18)
+                        .padding(.bottom, 16)
                 }
 
             case .done:
@@ -284,9 +291,14 @@ struct PairingPane: View {
         }
 
         do {
+            // deviceName / platform are optional on the wire but always sent
+            // (see PairConfirmRequest) — the host already has them from
+            // pair/start on this path, so they are simply confirmed.
             let request = PairConfirmRequest(pairingId: pairingId,
                                              deviceId: settings.clientDeviceId,
-                                             proof: proof)
+                                             proof: proof,
+                                             deviceName: settings.deviceName,
+                                             platform: "ios")
             let response = try await client.pairConfirm(request)
             KeychainStore.saveToken(response.deviceToken, forHost: response.host.deviceId)
             pairedHosts.add(PairedHost(deviceId: response.host.deviceId,
@@ -294,6 +306,9 @@ struct PairingPane: View {
                                        lastHost: target.host,
                                        lastPort: target.port,
                                        pairedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+            // First successful pairing is the sensible moment to ask about
+            // notifications — never at launch.
+            notifier.requestAuthorizationAfterPairing()
             withAnimation(.spring(response: 0.34, dampingFraction: 0.75)) {
                 stage = .done
             }

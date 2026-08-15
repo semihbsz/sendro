@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::link::LinkSession;
 use crate::types::{TransferSummary, TrustedDevice};
 
 /// Broadcast channel capacity for [`CoreEvent`]s.
@@ -43,6 +44,18 @@ pub enum CoreEvent {
         text: String,
         sender_name: String,
         received_at_ms: i64,
+    },
+    /// A Sendro Link guest session was started, changed or ended (§14).
+    /// `None` means there is no session any more (stopped or expired).
+    /// RAM only — nothing about it is ever persisted.
+    #[serde(rename_all = "camelCase")]
+    LinkSessionChanged { session: Option<LinkSession> },
+    /// A guest uploaded a file through the link session (§14.2). The
+    /// transfer itself also shows up in the queue/history as `Guest (link)`.
+    #[serde(rename_all = "camelCase")]
+    GuestUpload {
+        file_name: String,
+        size_bytes: u64,
     },
     #[serde(rename_all = "camelCase")]
     ServerStarted { port: u16 },

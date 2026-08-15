@@ -28,10 +28,20 @@ targets:
       - path: Sendro
         excludes:
           - "Info.plist"
+      # Shared with the SendroActivity extension — the ActivityAttributes
+      # type has to be identical in both binaries. Plain shared source; no
+      # App Group, no entitlement.
+      - path: Shared
+    dependencies:
+      # Embeds SendroActivity.appex into Sendro.app/PlugIns.
+      - target: SendroActivity
+        embed: true
     settings:
       base:
         # NOTE: sideloaders (Sideloadly / AltStore) usually rewrite the bundle
-        # id to match their free provisioning profile — change freely.
+        # id to match their free provisioning profile — change freely. If you
+        # change it here, change SendroActivity's to match: an app extension's
+        # bundle id MUST be prefixed by the containing app's.
         PRODUCT_BUNDLE_IDENTIFIER: com.sendro.ios
         PRODUCT_NAME: Sendro
         GENERATE_INFOPLIST_FILE: NO
@@ -41,6 +51,34 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTS_MACCATALYST: NO
         ENABLE_BITCODE: NO
+        CODE_SIGN_STYLE: Automatic
+
+  # Live Activity host (Dynamic Island + Lock Screen).
+  #
+  # Deployment target 16.1 because ActivityConfiguration doesn't exist before
+  # that; the app stays on 16.0 and gates every ActivityKit call behind
+  # #available, so a 16.0 device just never sees a Live Activity.
+  SendroActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.1"
+    sources:
+      - path: SendroActivity
+        excludes:
+          - "Info.plist"
+      - path: Shared
+      # Same palette/typography as the app, so the Island matches the UI.
+      - path: Sendro/Views/Theme.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sendro.ios.SendroActivity
+        PRODUCT_NAME: SendroActivity
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: SendroActivity/Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        ENABLE_BITCODE: NO
+        SKIP_INSTALL: YES
         CODE_SIGN_STYLE: Automatic
 
 schemes:

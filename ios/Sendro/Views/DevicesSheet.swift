@@ -26,15 +26,36 @@ struct DevicesSheet: View {
         case list
         case manual
         case pairing(PairTarget)
+        case scanQR
+        /// §13 — a scanned (or externally opened) pairing URL, awaiting the
+        /// user's explicit confirmation.
+        case qrConfirm(PairLink)
     }
+
+    /// Set when the sheet is opened by a `sendro://pair` URL (our scanner or
+    /// the iOS Camera app) — the sheet then opens straight on the confirm
+    /// step for that PC.
+    let initialLink: PairLink?
 
     @EnvironmentObject private var discovery: DiscoveryService
     @EnvironmentObject private var pairedHosts: PairedHostStore
     @EnvironmentObject private var engine: TransferEngine
     @Environment(\.dismiss) private var dismiss
 
-    @State private var stage: Stage = .list
+    @State private var stage: Stage
     @State private var unpairCandidate: PairedHost?
+    /// Panes taller than half the screen (keypad, camera) push the sheet to
+    /// the large detent so nothing is clipped on a 4.7"/SE-class screen.
+    @State private var detent: PresentationDetent = .medium
+
+    init(initialLink: PairLink? = nil) {
+        self.initialLink = initialLink
+        if let initialLink {
+            _stage = State(initialValue: .qrConfirm(initialLink))
+        } else {
+            _stage = State(initialValue: .list)
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -50,25 +71,38 @@ struct DevicesSheet: View {
                         listStage
                     case .manual:
                         ManualConnectPane(
-                            onBack: { withAnimation(.easeOut(duration: 0.2)) { stage = .list } },
-                            onFound: { target in
-                                withAnimation(.easeOut(duration: 0.2)) { stage = .pairing(target) }
-                            })
+                            onBack: { go(.list) },
+                            onFound: { target in go(.pairing(target)) })
                     case .pairing(let target):
                         PairingPane(target: target,
                                     onFinished: { dismiss() },
-                                    onCancel: { withAnimation(.easeOut(duration: 0.2)) { stage = .list } })
+                                    onCancel: { go(.list) })
+                    case .scanQR:
+                        QRScanPane(onCancel: { go(.list) },
+                                   onLink: { link in go(.qrConfirm(link)) })
+                    case .qrConfirm(let link):
+                        QRPairConfirmPane(link: link,
+                                          onFinished: { dismiss() },
+                                          onCancel: { go(.list) })
                     }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 24)
-                .padding(.bottom, 40)
+                .padding(.bottom, 24)
             }
             .scrollIndicators(.hidden)
+            // Breathing room under the last row of any pane — 24pt ON TOP of
+            // the home-indicator inset, which the sheet's safe area already
+            // provides. Without this the pairing keypad sits flush against
+            // the bottom edge of the screen.
+            .safeAreaInset(edge: .bottom) {
+                Color.clear.frame(height: 24)
+            }
         }
         .preferredColorScheme(.dark)
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.medium, .large], selection: $detent)
         .presentationDragIndicator(.visible)
+        .onAppear { syncDetent() }
         .confirmationDialog("Unpair this computer?",
                             isPresented: Binding(
                                 get: { unpairCandidate != nil },
@@ -83,6 +117,29 @@ struct DevicesSheet: View {
             Button("Cancel", role: .cancel) {
                 unpairCandidate = nil
             }
+        }
+    }
+
+    // MARK: Stage plumbing
+
+    private func go(_ newStage: Stage) {
+        withAnimation(.easeOut(duration: 0.2)) { stage = newStage }
+        syncDetent(for: newStage)
+    }
+
+    private func syncDetent() {
+        syncDetent(for: stage)
+    }
+
+    /// Tall panes (keypad, camera, confirm) need the large detent so nothing
+    /// is clipped on a 4.7"/SE-class screen; the device list is happy at
+    /// medium and keeps whatever the user dragged it to.
+    private func syncDetent(for stage: Stage) {
+        switch stage {
+        case .list:
+            break
+        case .manual, .pairing, .scanQR, .qrConfirm:
+            detent = .large
         }
     }
 
@@ -115,14 +172,50 @@ struct DevicesSheet: View {
             nearbyList
                 .padding(.top, 12)
 
+            // §13 — the fastest path: scan the QR the PC is showing. The
+            // typed 6-digit flow below stays fully functional.
             Button {
-                withAnimation(.easeOut(duration: 0.2)) { stage = .manual }
+                go(.scanQR)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 15, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Scan QR code")
+                            .font(Theme.sans(15, .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Text("Fastest — no typing")
+                            .font(Theme.mono(10))
+                            .foregroundColor(Theme.onAccent.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .opacity(0.6)
+                }
+                .foregroundColor(Theme.onAccent)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Theme.iris))
+                .shadow(color: Theme.iris.opacity(0.35), radius: 14, x: 0, y: 8)
+            }
+            .buttonStyle(PressableButtonStyle())
+            .padding(.top, 18)
+
+            Button {
+                go(.manual)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "number")
                         .font(.system(size: 12, weight: .semibold))
                     Text("Connect by IP address")
                         .font(Theme.sans(14, .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .foregroundColor(Theme.irisSoft)
                 .frame(maxWidth: .infinity)
@@ -130,13 +223,17 @@ struct DevicesSheet: View {
                 .glassRow(cornerRadius: 16, fillOpacity: 0.05, borderOpacity: 0.09)
             }
             .buttonStyle(PressableButtonStyle())
-            .padding(.top, 16)
+            .padding(.top, 10)
 
-            Text("Found over Bonjour. If discovery is blocked, connect by IP address — the Sendro window on your PC shows it.")
+            Text("Nearby computers are found over Bonjour. Scanning the QR code on your PC works even when discovery is blocked; “Connect by IP address” takes the six digits the Sendro window shows.")
                 .font(Theme.sans(12))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 14)
+
+            HotspotHelpCard(onManualConnect: { go(.manual) },
+                            onScanQR: { go(.scanQR) })
+                .padding(.top, 18)
         }
     }
 

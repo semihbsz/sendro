@@ -18,6 +18,14 @@ pub const SERVICE_TYPE: &str = "_sendro._tcp.local.";
 /// registration dies with it).
 pub(crate) fn advertise(core: &Core) -> anyhow::Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
+    advertise_on(core, &daemon)?;
+    Ok(daemon)
+}
+
+/// (Re-)register the service on an existing daemon. Registering the same
+/// instance again replaces the record, which is how a hotspot adapter that
+/// appeared after startup gets picked up.
+pub(crate) fn advertise_on(core: &Core, daemon: &ServiceDaemon) -> anyhow::Result<()> {
     let device_name = core.settings.read().device_name.clone();
     let instance = sanitize_instance_name(&device_name);
     let host_name = format!("sendro-{}.local.", short_id(core.device_id));
@@ -48,7 +56,7 @@ pub(crate) fn advertise(core: &Core) -> anyhow::Result<ServiceDaemon> {
         "mDNS: advertising {instance}.{SERVICE_TYPE} on port {}",
         core.port
     );
-    Ok(daemon)
+    Ok(())
 }
 
 /// Browse the LAN for Sendro instances for `timeout`. `exclude` filters out

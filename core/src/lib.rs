@@ -11,8 +11,11 @@ pub mod events;
 pub mod filename;
 pub mod hashing;
 pub mod history;
+pub mod link;
 pub mod messages;
+pub mod net;
 pub mod pairing;
+pub mod qr;
 pub mod range;
 pub mod server;
 pub mod state;
@@ -21,9 +24,9 @@ pub mod types;
 pub mod watch;
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -35,6 +38,9 @@ use uuid::Uuid;
 
 pub use config::CoreConfig;
 pub use events::CoreEvent;
+pub use link::{LinkFile, LinkOptions, LinkSession};
+pub use net::NetIface;
+pub use qr::{QrPairing, QrUrl};
 pub use types::{
     DiscoveredHost, HistoryEntry, HostInfo, IncomingMessage, Message, Settings, TransferState,
     TransferSummary, TrustedDevice, WatchFolderConfig,
@@ -51,7 +57,6 @@ pub struct Core {
     pub(crate) data_dir: PathBuf,
     pub(crate) settings: RwLock<Settings>,
     pub(crate) port: u16,
-    pub(crate) local_ips: Vec<String>,
 
     pub(crate) events: broadcast::Sender<CoreEvent>,
     pub(crate) pairings: pairing::PairingManager,
@@ -71,6 +76,15 @@ pub struct Core {
     /// dismisses the card. NEVER persisted, never in history.
     pub(crate) incoming: RwLock<VecDeque<IncomingMessage>>,
 
+    /// §14 Sendro Link guest session. RAM only — deliberately not part of
+    /// anything written to `data_dir`, so it cannot survive a restart.
+    pub(crate) link: RwLock<Option<link::LinkState>>,
+    /// Tokens of stopped/expired sessions, kept so their routes answer
+    /// `410 gone` instead of `404`, and so they are never reused.
+    pub(crate) link_retired: Mutex<VecDeque<String>>,
+    /// Live guest connections, capped at [`link::MAX_GUEST_CONNECTIONS`].
+    pub(crate) link_conns: Arc<AtomicUsize>,
+
     pub(crate) history: RwLock<Vec<HistoryEntry>>,
     pub(crate) watch_folders: RwLock<Vec<WatchFolderConfig>>,
     pub(crate) pending_detections: Mutex<HashMap<Uuid, PendingDetection>>,
@@ -84,6 +98,9 @@ pub struct Core {
     pub(crate) tasks: Mutex<Vec<JoinHandle<()>>>,
     pub(crate) mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
     pub(crate) mdns_enabled: bool,
+    /// Addresses the mDNS record was last built for; a change (hotspot
+    /// adapter appearing after startup) triggers a re-registration.
+    pub(crate) advertised_ips: Mutex<Vec<String>>,
     /// Weak self reference so `&self` methods can spawn owning tasks.
     pub(crate) self_ref: RwLock<Option<Weak<Core>>>,
 }
@@ -149,7 +166,6 @@ impl Core {
             data_dir: cfg.data_dir.clone(),
             settings: RwLock::new(settings),
             port,
-            local_ips: local_ips(),
             events,
             pairings: pairing::PairingManager::new(),
             trusted: RwLock::new(trusted),
@@ -160,6 +176,9 @@ impl Core {
             active_streams: Mutex::new(HashMap::new()),
             message_inbox: RwLock::new(HashMap::new()),
             incoming: RwLock::new(VecDeque::new()),
+            link: RwLock::new(None),
+            link_retired: Mutex::new(link::new_retired_store()),
+            link_conns: link::new_conn_counter(),
             history: RwLock::new(history),
             watch_folders: RwLock::new(watch_folders),
             pending_detections: Mutex::new(HashMap::new()),
@@ -170,6 +189,7 @@ impl Core {
             tasks: Mutex::new(Vec::new()),
             mdns: Mutex::new(None),
             mdns_enabled: cfg.mdns_enabled,
+            advertised_ips: Mutex::new(Vec::new()),
             self_ref: RwLock::new(None),
         });
         *core.self_ref.write() = Some(Arc::downgrade(&core));
@@ -252,7 +272,7 @@ impl Core {
             device_name: self.settings.read().device_name.clone(),
             platform: PLATFORM.to_string(),
             api_port: self.port,
-            local_ips: self.local_ips.clone(),
+            local_ips: net::info_local_ips(),
             protocol_version: PROTOCOL_VERSION,
         }
     }
@@ -422,6 +442,36 @@ impl Core {
     pub(crate) fn concurrency(&self) -> usize {
         self.settings.read().concurrency.max(1)
     }
+
+    /// Re-register the mDNS service when the set of local addresses changed.
+    ///
+    /// The daemon is created with `enable_addr_auto()`, so it tracks
+    /// interface changes by itself; this is the belt-and-braces path for the
+    /// case this whole feature exists for — a Windows "Mobile hotspot"
+    /// adapter that only appears once the user turns it on, long after
+    /// startup. Called from `network_interfaces()` (and therefore from
+    /// `start_qr_pairing()`), never from a request handler.
+    pub(crate) fn refresh_advertisement(&self, ifaces: &[net::NetIface]) {
+        if !self.mdns_enabled {
+            return;
+        }
+        let addresses: Vec<String> = ifaces.iter().map(|i| i.address.clone()).collect();
+        {
+            let mut advertised = self.advertised_ips.lock();
+            if *advertised == addresses {
+                return;
+            }
+            *advertised = addresses;
+        }
+        let daemon = self.mdns.lock();
+        if let Some(daemon) = daemon.as_ref() {
+            if let Err(e) = discovery::advertise_on(self, daemon) {
+                tracing::warn!("mDNS re-registration failed: {e}");
+            } else {
+                tracing::info!("mDNS: re-advertised after an interface change");
+            }
+        }
+    }
 }
 
 /// Bind `preferred`; on conflict fall back to preferred+1..=preferred+20.
@@ -450,28 +500,6 @@ async fn bind_listener(preferred: u16) -> anyhow::Result<tokio::net::TcpListener
     ))
 }
 
-/// Best-effort local IP enumeration (no extra deps): a UDP "connect" to a
-/// public address reveals the default-route interface address; no packets
-/// are actually sent.
-fn local_ips() -> Vec<String> {
-    let mut ips = Vec::new();
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                if let IpAddr::V4(v4) = addr.ip() {
-                    if !v4.is_loopback() && !v4.is_unspecified() {
-                        ips.push(v4.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if ips.is_empty() {
-        ips.push("127.0.0.1".to_string());
-    }
-    ips
-}
-
 /// Periodic maintenance: expire offers older than 24 h, purge stale pairing
 /// sessions, and emit `PairingFailed` for sessions that timed out.
 async fn maintenance_loop(core: Arc<Core>, mut shutdown: tokio_watch::Receiver<bool>) {
@@ -483,6 +511,7 @@ async fn maintenance_loop(core: Arc<Core>, mut shutdown: tokio_watch::Receiver<b
             _ = shutdown.wait_for(|v| *v) => break,
         }
         core.expire_stale_offers();
+        core.reap_expired_link();
         for pairing_id in core.pairings.purge_expired() {
             core.emit(CoreEvent::PairingFailed { pairing_id });
         }

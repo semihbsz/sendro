@@ -159,12 +159,21 @@ pub struct PairStartResponse {
 }
 
 /// `POST /api/v1/pair/confirm` request — §4.2.
+///
+/// `device_name`/`platform` are optional and only used by the §13 QR flow,
+/// where the client never called `pair/start` and therefore has not told the
+/// host who it is yet. They are ignored for a typed session (whose identity
+/// came from `pair/start`), so this stays backwards compatible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairConfirmRequest {
     pub pairing_id: Uuid,
     pub device_id: Uuid,
     pub proof: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

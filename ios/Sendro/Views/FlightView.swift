@@ -18,7 +18,11 @@ struct FlightView: View {
 
     @EnvironmentObject private var engine: TransferEngine
     @EnvironmentObject private var history: HistoryStore
+    @EnvironmentObject private var fileStore: FileStore
     @Environment(\.dismiss) private var dismiss
+
+    /// Set when the user taps Preview on the completed state.
+    @State private var preview: PreviewRequest?
 
     /// Raw throughput samples (bytes/s, newest last) for the bar meter.
     @State private var speedSamples: [Double] = Array(repeating: 0, count: 28)
@@ -140,6 +144,16 @@ struct FlightView: View {
         .onReceive(meterTimer) { _ in
             sampleSpeed()
         }
+        .fullScreenCover(item: $preview) { request in
+            FilePreviewScreen(request: request)
+        }
+    }
+
+    /// What the completed transfer can show, if anything (a local file, a
+    /// Photos asset, or the honest "it's in your Photos library" card).
+    private var completedPreview: PreviewRequest? {
+        guard let entry = completedEntry else { return nil }
+        return PreviewResolver.request(for: entry, fileStore: fileStore)
     }
 
     // MARK: Header
@@ -464,20 +478,34 @@ struct FlightView: View {
     @ViewBuilder
     private var bottomControls: some View {
         if isDone {
-            Button {
-                dismiss()
-            } label: {
-                Text("Done")
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundColor(Theme.teal)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Theme.teal.opacity(0.16)))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Theme.teal.opacity(0.35), lineWidth: 0.5))
+            HStack(spacing: 10) {
+                if let request = completedPreview {
+                    Button {
+                        preview = request
+                    } label: {
+                        AccentPillLabel(title: "Preview", height: 50)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundColor(Theme.teal)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Theme.teal.opacity(0.16)))
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Theme.teal.opacity(0.35), lineWidth: 0.5))
+                }
+                .buttonStyle(PressableButtonStyle())
             }
-            .buttonStyle(PressableButtonStyle())
         } else if let transfer = liveTransfer {
             switch transfer.phase {
             case .preparing, .downloading, .verifying, .saving:

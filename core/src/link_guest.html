@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<title>Sendro Link</title>
+<!--
+  PROTOCOL.md §14 guest page. One self-contained document: inline CSS + JS,
+  no CDN, no webfont, no outbound request of any kind — it has to work on a
+  phone that is joined to a hotspot with zero internet access.
+
+  The page URL contains the session token, so nothing here may put that URL
+  into an outbound link, an image, or a referrer. Every request below is a
+  *relative* URL resolved against this page.
+-->
+<style>
+  :root {
+    --canvas: #07080B;
+    --surface: #101219;
+    --surface-2: #171A23;
+    --line: #232733;
+    --text: #EDF0F7;
+    --muted: #939BB0;
+    --iris: #78A1FF;
+    --teal: #37E6C4;
+    --danger: #FF7A85;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--canvas);
+    color: var(--text);
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    padding: 28px 20px 64px;
+    max-width: 640px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+  header { margin-bottom: 28px; }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 650;
+    letter-spacing: 0.2px;
+  }
+  .dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--iris);
+    box-shadow: 0 0 16px rgba(120, 161, 255, 0.7);
+    flex: none;
+  }
+  h1 { font-size: 22px; margin: 18px 0 6px; font-weight: 640; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0; }
+  .countdown { color: var(--iris); font-variant-numeric: tabular-nums; }
+  .countdown.warn { color: var(--danger); }
+
+  section { margin-top: 30px; }
+  h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--muted);
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.file {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+  .file .meta { min-width: 0; flex: 1; }
+  .file .name {
+    font-weight: 550;
+    word-break: break-word;
+  }
+  .file .size { color: var(--muted); font-size: 13px; }
+  a.btn, button.btn {
+    -webkit-appearance: none;
+    appearance: none;
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 16px;
+    background: var(--iris);
+    color: #05070D;
+    font: inherit;
+    font-weight: 640;
+    text-decoration: none;
+    cursor: pointer;
+    flex: none;
+  }
+  a.btn:active, button.btn:active { transform: translateY(1px); }
+  button.btn[disabled] { opacity: 0.45; cursor: default; }
+  button.ghost {
+    background: transparent;
+    color: var(--iris);
+    border: 1px solid var(--line);
+  }
+  .empty, .note {
+    color: var(--muted);
+    font-size: 14px;
+    background: var(--surface);
+    border: 1px dashed var(--line);
+    border-radius: 14px;
+    padding: 18px;
+  }
+  #drop {
+    border: 1.5px dashed var(--line);
+    border-radius: 16px;
+    padding: 26px 20px;
+    text-align: center;
+    background: var(--surface);
+    transition: border-color .15s ease, background .15s ease;
+  }
+  #drop.over { border-color: var(--iris); background: var(--surface-2); }
+  #drop p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+  li.up {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+  }
+  li.up .row { display: flex; gap: 12px; align-items: baseline; }
+  li.up .name { flex: 1; word-break: break-word; font-weight: 550; }
+  li.up .state { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  li.up.done .state { color: var(--teal); }
+  li.up.fail .state { color: var(--danger); }
+  .bar {
+    height: 6px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  .bar > i {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--iris);
+    transition: width .15s linear;
+  }
+  li.up.done .bar > i { background: var(--teal); }
+  li.up.fail .bar > i { background: var(--danger); }
+  footer {
+    margin-top: 42px;
+    color: var(--muted);
+    font-size: 12px;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span> Sendro Link</div>
+  <h1 id="title">Shared with you</h1>
+  <p class="sub" id="subtitle">Connecting…</p>
+</header>
+
+<section id="files-section" class="hidden">
+  <h2>Files</h2>
+  <ul id="files"></ul>
+  <div id="files-empty" class="empty hidden">Nothing has been shared yet.</div>
+</section>
+
+<section id="upload-section" class="hidden">
+  <h2>Send to this PC</h2>
+  <div id="drop">
+    <p>Drop files here, or pick them.</p>
+    <button class="btn" id="pick" type="button">Choose files</button>
+    <input id="picker" type="file" multiple class="hidden">
+  </div>
+  <ul id="uploads"></ul>
+  <p class="note hidden" id="nohash">
+    This browser cannot compute checksums over a plain-http connection, so
+    uploads are sent without one and the PC will not mark them verified.
+  </p>
+</section>
+
+<section id="dead" class="hidden">
+  <div class="note" id="dead-text">This link is no longer active.</div>
+</section>
+
+<footer>Served directly by the PC on your local network. Nothing leaves it.</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  // Everything is addressed relative to this page, so the token in the path
+  // is never re-embedded anywhere by this script.
+  var API = "api/";
+
+  var el = function (id) { return document.getElementById(id); };
+  var state = { expiresAtMs: 0, allowUpload: false, timer: null, dead: false };
+
+  function fmtSize(n) {
+    if (n === 0) { return "0 B"; }
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var i = Math.floor(Math.log(n) / Math.log(1024));
+    if (i >= units.length) { i = units.length - 1; }
+    var v = n / Math.pow(1024, i);
+    return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
+  }
+
+  function fmtLeft(ms) {
+    if (ms < 0) { ms = 0; }
+    var total = Math.floor(ms / 1000);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    var pad = function (x) { return (x < 10 ? "0" : "") + x; };
+    return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
+  }
+
+  // RFC 5987 value for X-Sendro-File-Name. encodeURIComponent leaves a few
+  // characters that are not attr-chars, so encode those too; the host
+  // percent-decodes the whole thing.
+  function rfc5987(name) {
+    return "UTF-8''" + encodeURIComponent(name).replace(/['()!*]/g, function (c) {
+      return "%" + c.charCodeAt(0).toString(16).toUpperCase();
+    });
+  }
+
+  function died(message) {
+    if (state.dead) { return; }
+    state.dead = true;
+    if (state.timer) { clearInterval(state.timer); }
+    el("files-section").classList.add("hidden");
+    el("upload-section").classList.add("hidden");
+    el("dead").classList.remove("hidden");
+    el("dead-text").textContent = message;
+    el("title").textContent = "Link closed";
+    el("subtitle").textContent = "";
+  }
+
+  function tick() {
+    var left = state.expiresAtMs - Date.now();
+    var span = el("countdown");
+    if (!span) { return; }
+    span.textContent = fmtLeft(left);
+    if (left <= 60000) { span.classList.add("warn"); }
+    if (left <= 0) { died("This link has expired."); }
+  }
+
+  function renderSession(s) {
+    state.expiresAtMs = s.expiresAtMs;
+    state.allowUpload = !!s.allowUpload;
+    el("title").textContent = s.hostName + " shared with you";
+    el("subtitle").innerHTML =
+      'Available for <span class="countdown" id="countdown">…</span>';
+    tick();
+    if (!state.timer) { state.timer = setInterval(tick, 1000); }
+
+    var list = el("files");
+    list.textContent = "";
+    (s.files || []).forEach(function (f) {
+      var li = document.createElement("li");
+      li.className = "file";
+      var meta = document.createElement("div");
+      meta.className = "meta";
+      var name = document.createElement("div");
+      name.className = "name";
+      name.textContent = f.fileName;
+      var size = document.createElement("div");
+      size.className = "size";
+      size.textContent = fmtSize(f.sizeBytes);
+      meta.appendChild(name);
+      meta.appendChild(size);
+      var a = document.createElement("a");
+      a.className = "btn";
+      a.href = API + "file/" + encodeURIComponent(f.fileId);
+      a.setAttribute("download", f.fileName);
+      a.rel = "noreferrer";
+      a.textContent = "Download";
+      li.appendChild(meta);
+      li.appendChild(a);
+      list.appendChild(li);
+    });
+    el("files-section").classList.remove("hidden");
+    el("files-empty").classList.toggle("hidden", (s.files || []).length > 0);
+    el("upload-section").classList.toggle("hidden", !state.allowUpload);
+    if (state.allowUpload && !canHash()) {
+      el("nohash").classList.remove("hidden");
+    }
+  }
+
+  function loadSession(onDone) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", API + "session", true);
+    xhr.onload = function () {
+      if (xhr.status === 410) { died("This link has expired or was stopped."); return; }
+      if (xhr.status !== 200) { died("This link is no longer active."); return; }
+      var parsed;
+      try { parsed = JSON.parse(xhr.responseText); } catch (e) { return; }
+      renderSession(parsed);
+      if (onDone) { onDone(); }
+    };
+    xhr.onerror = function () {
+      el("subtitle").textContent = "Lost connection to the PC.";
+    };
+    xhr.send();
+  }
+
+  // crypto.subtle only exists in a secure context. Sendro Link is plain
+  // http on the LAN by design (PROTOCOL.md §3), so on most browsers this is
+  // undefined and we upload WITHOUT the hash header: the host then skips
+  // verification instead of pretending the file was verified.
+  function canHash() {
+    return !!(window.crypto && window.crypto.subtle && window.crypto.subtle.digest);
+  }
+
+  // Hashing needs the whole file in memory, so only do it for smaller files;
+  // a 4 GB video would kill the tab for no benefit.
+  var HASH_LIMIT = 64 * 1024 * 1024;
+
+  function withHash(file, cb) {
+    if (!canHash() || file.size > HASH_LIMIT || !window.FileReader) {
+      cb(null);
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var p = window.crypto.subtle.digest("SHA-256", reader.result);
+        p.then(function (buf) {
+          var bytes = new Uint8Array(buf), hex = "";
+          for (var i = 0; i < bytes.length; i++) {
+            hex += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+          }
+          cb(hex);
+        })["catch"](function () { cb(null); });
+      } catch (e) { cb(null); }
+    };
+    reader.onerror = function () { cb(null); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  var queue = [];
+  var busy = false;
+
+  function enqueue(files) {
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      var li = document.createElement("li");
+      li.className = "up";
+      var row = document.createElement("div");
+      row.className = "row";
+      var name = document.createElement("span");
+      name.className = "name";
+      name.textContent = file.name;
+      var st = document.createElement("span");
+      st.className = "state";
+      st.textContent = "waiting";
+      row.appendChild(name);
+      row.appendChild(st);
+      var bar = document.createElement("div");
+      bar.className = "bar";
+      var fill = document.createElement("i");
+      bar.appendChild(fill);
+      li.appendChild(row);
+      li.appendChild(bar);
+      el("uploads").appendChild(li);
+      queue.push({ file: file, li: li, state: st, fill: fill });
+    }
+    pump();
+  }
+
+  function pump() {
+    if (busy || queue.length === 0 || state.dead) { return; }
+    busy = true;
+    var job = queue.shift();
+    job.state.textContent = "preparing";
+    withHash(job.file, function (hex) { send(job, hex); });
+  }
+
+  function send(job, hex) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", API + "upload", true);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("X-Sendro-File-Name", rfc5987(job.file.name));
+    if (hex) { xhr.setRequestHeader("X-Sendro-Sha256", hex); }
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) { return; }
+      var pct = Math.round((e.loaded / e.total) * 100);
+      job.fill.style.width = pct + "%";
+      job.state.textContent = pct + "%";
+    };
+    xhr.onload = function () {
+      busy = false;
+      if (xhr.status === 200) {
+        job.li.className = "up done";
+        job.fill.style.width = "100%";
+        job.state.textContent = hex ? "sent, verified" : "sent";
+        loadSession(null);
+      } else if (xhr.status === 410) {
+        job.li.className = "up fail";
+        job.state.textContent = "link closed";
+        died("This link has expired or was stopped.");
+      } else if (xhr.status === 422) {
+        job.li.className = "up fail";
+        job.state.textContent = "checksum mismatch";
+      } else if (xhr.status === 429) {
+        job.li.className = "up fail";
+        job.state.textContent = "upload limit reached";
+      } else if (xhr.status === 503) {
+        job.li.className = "up fail";
+        job.state.textContent = "PC busy, try again";
+      } else {
+        job.li.className = "up fail";
+        job.state.textContent = "failed (" + xhr.status + ")";
+      }
+      pump();
+    };
+    xhr.onerror = function () {
+      busy = false;
+      job.li.className = "up fail";
+      job.state.textContent = "connection lost";
+      pump();
+    };
+    job.state.textContent = "0%";
+    xhr.send(job.file);
+  }
+
+  el("pick").addEventListener("click", function () { el("picker").click(); });
+  el("picker").addEventListener("change", function () {
+    if (this.files && this.files.length) { enqueue(this.files); }
+    this.value = "";
+  });
+
+  var drop = el("drop");
+  ["dragenter", "dragover"].forEach(function (t) {
+    drop.addEventListener(t, function (e) {
+      e.preventDefault();
+      drop.classList.add("over");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (t) {
+    drop.addEventListener(t, function (e) {
+      e.preventDefault();
+      drop.classList.remove("over");
+    });
+  });
+  drop.addEventListener("drop", function (e) {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      enqueue(e.dataTransfer.files);
+    }
+  });
+
+  loadSession(null);
+})();
+</script>
+</body>
+</html>

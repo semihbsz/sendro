@@ -2431,3 +2431,746 @@ select.input option {
   justify-content: flex-end;
   margin-top: 18px;
 }
+
+/* ---------- Kind badges (LAN / Hotspot / Other) ---------- */
+
+.kind-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 7px;
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  background: var(--glass-4);
+  border: var(--hairline-strong);
+  color: var(--text-faint);
+}
+
+.kind-badge.lan {
+  background: var(--accent-softer);
+  border-color: var(--accent-border);
+  color: var(--accent-pale);
+}
+
+.kind-badge.hotspot {
+  background: var(--verify-dim);
+  border-color: rgba(55, 230, 196, 0.3);
+  color: var(--verify);
+}
+
+/* ---------- QR ---------- */
+
+.qr-panel {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+/* Dark-on-white, always: a phone camera expects that polarity and an
+   inverted code fails on a lot of scanners. */
+.qr-tile {
+  flex: none;
+  padding: 0;
+  border-radius: var(--r-lg);
+  background: #ffffff;
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  animation: pc-pop 260ms var(--ease-out);
+}
+
+.qr-tile-failed {
+  background: var(--glass-3);
+  border: var(--hairline-strong);
+  padding: 22px;
+  text-align: center;
+  font: 400 12px/1.5 var(--font-ui);
+  color: var(--text-faint);
+}
+
+.qr-placeholder {
+  width: 288px;
+  height: 288px;
+  border-radius: var(--r-lg);
+  background: var(--glass-2);
+  border: var(--hairline);
+  animation: pc-breathe 1800ms var(--ease-out) infinite;
+}
+
+.qr-addr-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.qr-addr {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-radius: var(--r-xs);
+  background: var(--glass-2);
+  border: var(--hairline);
+  transition:
+    background var(--t-fast),
+    border-color var(--t-fast);
+}
+
+.qr-addr:hover {
+  background: var(--glass-4);
+}
+
+.qr-addr.active {
+  background: var(--accent-softer);
+  border-color: var(--accent-border);
+}
+
+.qr-addr-ip {
+  font: 500 11px/1 var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.qr-addr.active .qr-addr-ip {
+  color: var(--text-soft);
+}
+
+.qr-addr-single {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 11px/1 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.qr-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.qr-fallback-label {
+  font: 400 10.5px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+
+.pairing-code.compact {
+  gap: 5px;
+}
+
+.pairing-code.compact .pairing-digit {
+  width: 30px;
+  height: 40px;
+  font-size: 20px;
+}
+
+.qr-foot {
+  font: 400 11px/1.4 var(--font-mono);
+  color: var(--text-ghost);
+  text-align: center;
+}
+
+/* Pairing modal tabs */
+
+.pair-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  border: var(--hairline);
+}
+
+.pair-tab {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font: 500 12px/1 var(--font-ui);
+  color: var(--text-faint);
+  transition:
+    background var(--t-fast),
+    color var(--t-fast);
+}
+
+.pair-tab:hover {
+  color: var(--text-soft);
+}
+
+.pair-tab.active {
+  background: var(--glass-5);
+  color: var(--text-bright);
+}
+
+/* ---------- Connection card ---------- */
+
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.settings-section-head .strip-label {
+  margin: 0;
+}
+
+.conn-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: var(--hairline);
+}
+
+.conn-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.conn-empty {
+  padding: 16px 2px 2px;
+  font: 400 12.5px/1.5 var(--font-ui);
+  color: var(--text-faint);
+}
+
+.conn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.conn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  border: var(--hairline);
+}
+
+.conn-row.best {
+  background: var(--accent-softer);
+  border-color: var(--accent-border);
+}
+
+.conn-addr {
+  font: 500 12.5px/1 var(--font-mono);
+  color: var(--text-soft);
+}
+
+.conn-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 11.5px/1 var(--font-ui);
+  color: var(--text-tertiary);
+}
+
+.conn-best-tag {
+  flex: none;
+  font: 500 10px/1 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-pale);
+}
+
+/* ---------- Sendro Link ---------- */
+
+.link-card {
+  margin-top: 20px;
+  padding: 18px 20px;
+  border-radius: var(--r-xl);
+  background: var(--glass-2);
+  border: var(--hairline-strong);
+  animation: pc-in 260ms var(--ease-out);
+}
+
+.link-card.live {
+  background: linear-gradient(
+    150deg,
+    oklch(0.72 0.18 265 / 0.1),
+    rgba(255, 255, 255, 0.03)
+  );
+  border-color: var(--accent-border);
+}
+
+.link-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.link-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.link-title {
+  font: 600 16px/1.2 var(--font-ui);
+  color: var(--text-bright);
+  letter-spacing: -0.015em;
+}
+
+.link-sub {
+  margin-top: 4px;
+  font: 400 12px/1.4 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.link-live-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--verify);
+  box-shadow: var(--verify-glow);
+  animation: pc-breathe 2000ms var(--ease-out) infinite;
+}
+
+.link-countdown {
+  font: 600 15px/1 var(--font-mono);
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.btn-stop {
+  display: inline-flex;
+  align-items: center;
+  padding: 11px 20px;
+  border-radius: 14px;
+  background: var(--danger-bg);
+  border: 0.5px solid rgba(255, 120, 120, 0.35);
+  color: var(--danger-strong);
+  font: 600 13.5px/1 var(--font-ui);
+  transition:
+    background var(--t-fast),
+    transform var(--t-fast);
+}
+
+.btn-stop:hover {
+  background: var(--danger-bg-hot);
+}
+
+.btn-stop:active {
+  transform: translateY(1px);
+}
+
+.link-live-body {
+  display: flex;
+  gap: 22px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+.link-url-col {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.link-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.link-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.32);
+  border: var(--hairline-strong);
+  font: 500 13.5px/1.2 var(--font-mono);
+  color: var(--accent-pale);
+  user-select: text;
+  cursor: text;
+}
+
+.link-addr-note {
+  margin-top: 7px;
+  font: 400 11px/1.5 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.link-stats {
+  display: flex;
+  gap: 28px;
+  margin-top: 16px;
+}
+
+.link-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 16px;
+  padding: 11px 13px;
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  border: var(--hairline);
+  font: 400 12px/1.55 var(--font-ui);
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+.link-warn svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.link-qr-col {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-qr-cap {
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: var(--hairline);
+}
+
+.link-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.link-durations {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  padding: 8px 14px;
+  border-radius: var(--r-xs);
+  background: var(--glass-2);
+  border: var(--hairline);
+  font: 500 12px/1 var(--font-ui);
+  color: var(--text-faint);
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    border-color var(--t-fast);
+}
+
+.chip:hover {
+  background: var(--glass-4);
+  color: var(--text-soft);
+}
+
+.chip.active {
+  background: var(--accent-softer);
+  border-color: var(--accent-border);
+  color: var(--accent-pale);
+}
+
+.link-files {
+  margin-top: 18px;
+}
+
+.link-files-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.link-files-head .strip-label {
+  margin: 0;
+}
+
+.link-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--r-sm);
+  background: var(--glass-2);
+  border: var(--hairline);
+}
+
+.link-file-row + .link-file-row {
+  margin-top: 5px;
+}
+
+.link-file-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--glass-3);
+  color: var(--text-faint);
+}
+
+.link-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font: 500 12.5px/1.3 var(--font-ui);
+  color: var(--text-soft);
+}
+
+.link-file-name.static {
+  cursor: default;
+}
+
+.link-file-size {
+  flex: none;
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+.link-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.link-note {
+  flex: 1;
+  min-width: 0;
+  font: 400 11.5px/1.5 var(--font-ui);
+  color: var(--text-tertiary);
+  text-wrap: pretty;
+}
+
+/* ---------- File preview modal ---------- */
+
+.file-name-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  /* These name classes ellipsize inside flex rows; a button is a flex item
+     with min-width:auto by default, which would defeat that. */
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+
+.col-file .file-name-btn {
+  flex: 1;
+}
+
+/* The QR tab makes the pairing modal the tallest thing in the app; never let
+   it run off a 640pt-high window. */
+.modal {
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
+}
+
+.file-name-btn:hover {
+  color: var(--accent-pale);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 0.5px;
+}
+
+/* Sits inline inside .detect-title's sentence — keep the text baseline. */
+.detect-file {
+  font: inherit;
+  color: inherit;
+  vertical-align: baseline;
+}
+
+.preview-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1080px, calc(100vw - 96px));
+  height: min(760px, calc(100vh - 108px));
+  border-radius: var(--r-2xl);
+  background: linear-gradient(
+    160deg,
+    rgba(30, 32, 46, 0.97),
+    rgba(14, 15, 22, 0.98)
+  );
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  box-shadow: var(--shadow-modal);
+  animation: pc-pop 300ms var(--ease-out);
+  overflow: hidden;
+}
+
+.preview-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-bottom: var(--hairline);
+}
+
+.preview-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.preview-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 15px/1.25 var(--font-ui);
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+.preview-meta {
+  display: block;
+  margin-top: 3px;
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+  cursor: zoom-in;
+  user-select: none;
+}
+
+.preview-image.zoomed {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.preview-video {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: var(--r-sm);
+  background: #000;
+  outline: none;
+}
+
+.preview-audio-wrap {
+  width: min(560px, 100%);
+}
+
+.preview-audio {
+  width: 100%;
+}
+
+.preview-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: var(--r-sm);
+  background: #fff;
+}
+
+.preview-text {
+  align-self: stretch;
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.35);
+  border: var(--hairline);
+  font: 400 12px/1.65 var(--font-mono);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  cursor: text;
+}
+
+.preview-trunc {
+  align-self: stretch;
+  margin-top: 10px;
+  font: 400 11px/1.5 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.preview-note {
+  font: 400 12.5px/1.5 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.preview-empty-title {
+  font: 600 15px/1.25 var(--font-ui);
+  color: var(--text-soft);
+}
+
+.preview-empty-sub {
+  font: 400 12.5px/1.6 var(--font-ui);
+  color: var(--text-tertiary);
+  text-wrap: pretty;
+}
+
+.preview-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 18px;
+  border-top: var(--hairline);
+}
+
+.preview-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-ghost);
+  direction: rtl;
+  text-align: left;
+}

@@ -16,6 +16,9 @@ struct SendroApp: App {
     @StateObject private var fileStore: FileStore
     @StateObject private var discovery: DiscoveryService
     @StateObject private var messages: MessageCenter
+    @StateObject private var notifier: Notifier
+    @StateObject private var network: NetworkWatcher
+    @StateObject private var tray: SendTray
     @StateObject private var engine: TransferEngine
     @StateObject private var uploader: UploadEngine
 
@@ -26,12 +29,18 @@ struct SendroApp: App {
         let fileStore = FileStore()
         let discovery = DiscoveryService()
         let messages = MessageCenter()
+        // Owns the UNUserNotificationCenter delegate; must outlive every
+        // notification, hence a StateObject rather than a local.
+        let notifier = Notifier(settings: settings)
+        let network = NetworkWatcher()
+        let tray = SendTray()
         let engine = TransferEngine(settings: settings,
                                     paired: pairedHosts,
                                     history: history,
                                     fileStore: fileStore,
                                     discovery: discovery,
-                                    messages: messages)
+                                    messages: messages,
+                                    notifier: notifier)
         let uploader = UploadEngine(paired: pairedHosts, history: history)
         _settings = StateObject(wrappedValue: settings)
         _pairedHosts = StateObject(wrappedValue: pairedHosts)
@@ -39,6 +48,9 @@ struct SendroApp: App {
         _fileStore = StateObject(wrappedValue: fileStore)
         _discovery = StateObject(wrappedValue: discovery)
         _messages = StateObject(wrappedValue: messages)
+        _notifier = StateObject(wrappedValue: notifier)
+        _network = StateObject(wrappedValue: network)
+        _tray = StateObject(wrappedValue: tray)
         _engine = StateObject(wrappedValue: engine)
         _uploader = StateObject(wrappedValue: uploader)
     }
@@ -52,6 +64,9 @@ struct SendroApp: App {
                 .environmentObject(fileStore)
                 .environmentObject(discovery)
                 .environmentObject(messages)
+                .environmentObject(notifier)
+                .environmentObject(network)
+                .environmentObject(tray)
                 .environmentObject(engine)
                 .environmentObject(uploader)
         }

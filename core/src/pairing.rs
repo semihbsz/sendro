@@ -29,8 +29,12 @@ pub struct PairingSession {
     pub pairing_id: Uuid,
     pub code: String,
     pub salt: [u8; 16],
+    /// The client that started the session; `Uuid::nil()` for a QR session
+    /// (§13), where the client only shows up at confirm time.
     pub device_id: Uuid,
+    /// Empty for a QR session — the confirming client supplies its own name.
     pub device_name: String,
+    /// Empty for a QR session.
     pub platform: String,
     pub created_at: Instant,
     pub attempts: u32,
@@ -87,21 +91,32 @@ impl PairingManager {
         if sessions.len() >= MAX_CONCURRENT_SESSIONS {
             return Err(StartError::TooManySessions);
         }
-        let code = generate_code();
-        let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
-        let session = PairingSession {
-            pairing_id: Uuid::new_v4(),
-            code,
-            salt,
-            device_id,
-            device_name,
-            platform,
-            created_at: Instant::now(),
-            attempts: 0,
-        };
-        sessions.insert(session.pairing_id, session.clone());
-        Ok(session)
+        Ok(insert_session(&mut sessions, device_id, device_name, platform))
+    }
+
+    /// Start a session for QR display (§13).
+    ///
+    /// Identical machinery to [`PairingManager::start`] — same TTL, same
+    /// attempt limit, same code space — except for two things: the client is
+    /// not known yet (it identifies itself in `POST /api/v1/pair/confirm`;
+    /// empty `device_name`/`platform` here mean "take it from the confirm
+    /// request"), and this never fails. The concurrency cap exists to bound
+    /// *network-initiated* pairing attempts; a local user pressing the QR
+    /// button instead evicts the oldest session.
+    pub fn start_qr(&self) -> PairingSession {
+        let mut sessions = self.sessions.lock();
+        sessions.retain(|_, s| !s.expired());
+        while sessions.len() >= MAX_CONCURRENT_SESSIONS {
+            let Some(oldest) = sessions
+                .values()
+                .min_by_key(|s| s.created_at)
+                .map(|s| s.pairing_id)
+            else {
+                break;
+            };
+            sessions.remove(&oldest);
+        }
+        insert_session(&mut sessions, Uuid::nil(), String::new(), String::new())
     }
 
     /// Verify a proof for `pairing_id` from `device_id`.
@@ -150,6 +165,30 @@ impl PairingManager {
         }
         expired
     }
+}
+
+/// Build a session with a fresh code + salt and insert it. Called with the
+/// session map already locked so the cap check and the insert cannot race.
+fn insert_session(
+    sessions: &mut HashMap<Uuid, PairingSession>,
+    device_id: Uuid,
+    device_name: String,
+    platform: String,
+) -> PairingSession {
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let session = PairingSession {
+        pairing_id: Uuid::new_v4(),
+        code: generate_code(),
+        salt,
+        device_id,
+        device_name,
+        platform,
+        created_at: Instant::now(),
+        attempts: 0,
+    };
+    sessions.insert(session.pairing_id, session.clone());
+    session
 }
 
 /// 6-digit crypto-random numeric code (leading zeros preserved).

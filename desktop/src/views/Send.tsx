@@ -4,6 +4,7 @@ import { useAppDispatch, useAppState } from "../store";
 import { IconDrop, IconSend, IconShieldCheck } from "../icons";
 import { formatBytes, isOnline } from "../format";
 import { TransferCard } from "../components/TransferCard";
+import { LinkPanel } from "../components/LinkPanel";
 import { readClipboardForSend } from "../paste";
 import { isTerminal } from "../types";
 
@@ -212,6 +213,8 @@ export function Send() {
           )}
         </div>
       </div>
+
+      <LinkPanel />
 
       <div className="send-cols">
         <div className="send-left">

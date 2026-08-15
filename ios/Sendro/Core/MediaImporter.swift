@@ -69,11 +69,16 @@ enum MediaImporter {
     ///   on-disk name may carry a transferId prefix, so pass this explicitly.
     /// - Parameter moveFile: when true PhotoKit takes ownership of the file
     ///   (it is moved, not copied) — maps to "Delete temp after import".
+    /// - Returns: the created asset's `localIdentifier`, when PhotoKit gave us
+    ///   a placeholder. Stored in history so the in-app preview can pull the
+    ///   image back out of Photos once the local temp is gone. nil is not an
+    ///   error — the import still succeeded.
+    @discardableResult
     static func importToPhotos(fileURL: URL,
                                kind: MediaKind,
                                originalFilename: String,
                                moveFile: Bool,
-                               addToAlbum: Bool) async throws {
+                               addToAlbum: Bool) async throws -> String? {
         // Add-only access is requested up front — the very first import
         // triggers the system prompt.
         let addStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
@@ -102,16 +107,19 @@ enum MediaImporter {
             options.uniformTypeIdentifier = type.identifier
         }
 
+        var createdIdentifier: String?
         let library = PHPhotoLibrary.shared()
         try await library.performChanges {
             let creation = PHAssetCreationRequest.forAsset()
             creation.addResource(with: kind.resourceType, fileURL: fileURL, options: options)
-            if let album,
-               let placeholder = creation.placeholderForCreatedAsset,
-               let albumRequest = PHAssetCollectionChangeRequest(for: album) {
-                albumRequest.addAssets([placeholder] as NSArray)
+            if let placeholder = creation.placeholderForCreatedAsset {
+                createdIdentifier = placeholder.localIdentifier
+                if let album, let albumRequest = PHAssetCollectionChangeRequest(for: album) {
+                    albumRequest.addAssets([placeholder] as NSArray)
+                }
             }
         }
+        return createdIdentifier
     }
 
     private static func fetchOrCreateAlbum(named name: String) async throws -> PHAssetCollection {

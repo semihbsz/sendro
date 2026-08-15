@@ -11,11 +11,11 @@ use tauri_plugin_opener::OpenerExt as _;
 use uuid::Uuid;
 
 use sendro_core::{
-    HistoryEntry, HostInfo, IncomingMessage, Settings, TransferSummary, TrustedDevice,
-    WatchFolderConfig,
+    HistoryEntry, HostInfo, IncomingMessage, LinkOptions, LinkSession, NetIface, QrPairing,
+    Settings, TransferSummary, TrustedDevice, WatchFolderConfig,
 };
 
-use crate::{tray::TrayState, AppState};
+use crate::{show_main_window, tray::TrayState, AppState};
 
 #[tauri::command]
 pub fn get_info(state: State<'_, AppState>) -> HostInfo {
@@ -69,6 +69,9 @@ pub async fn offer_files(
     paths: Vec<PathBuf>,
     auto_accept: bool,
 ) -> Result<Vec<TransferSummary>, String> {
+    // The user just picked these, so they may be previewed in-app. The guard
+    // is taken and dropped inside the helper — never held across the await.
+    state.remember_previewable(paths.iter().cloned());
     state
         .core
         .offer_files(device_id, paths, auto_accept)
@@ -302,6 +305,78 @@ fn encode_pasted_png(
         .save_with_format(&path, image::ImageFormat::Png)
         .map_err(|e| format!("could not encode PNG: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// ---------------------------------------------------------------------------
+// QR pairing (PROTOCOL.md §13)
+// ---------------------------------------------------------------------------
+
+/// Open a pairing session for QR display. Same session machinery as the typed
+/// code — it emits the usual `PairingStarted`, so the modal keeps showing the
+/// 6-digit fallback. Addresses are re-enumerated by the core on every call.
+#[tauri::command]
+pub fn start_qr_pairing(state: State<'_, AppState>) -> QrPairing {
+    state.core.start_qr_pairing()
+}
+
+// ---------------------------------------------------------------------------
+// Sendro Link — guest web sessions (PROTOCOL.md §14). RAM only, one at a time.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn start_link_session(
+    state: State<'_, AppState>,
+    opts: LinkOptions,
+) -> Result<LinkSession, String> {
+    state.remember_previewable(opts.paths.iter().cloned());
+    state
+        .core
+        .start_link_session(opts)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn stop_link_session(state: State<'_, AppState>) -> bool {
+    state.core.stop_link_session()
+}
+
+#[tauri::command]
+pub fn link_session(state: State<'_, AppState>) -> Option<LinkSession> {
+    state.core.link_session()
+}
+
+#[tauri::command]
+pub fn add_link_files(
+    state: State<'_, AppState>,
+    paths: Vec<PathBuf>,
+) -> Result<LinkSession, String> {
+    state.remember_previewable(paths.iter().cloned());
+    state.core.add_link_files(paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_link_file(state: State<'_, AppState>, file_id: Uuid) -> bool {
+    state.core.remove_link_file(file_id)
+}
+
+// ---------------------------------------------------------------------------
+// Network surface — the hotspot / no-router screen
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn network_interfaces(state: State<'_, AppState>) -> Vec<NetIface> {
+    state.core.network_interfaces()
+}
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
+
+/// Show, restore and focus the main window — used by the notification click
+/// handler where the plugin surfaces one.
+#[tauri::command]
+pub fn show_window(app: AppHandle) {
+    show_main_window(&app);
 }
 
 /// Opens the configured receive folder in Explorer.

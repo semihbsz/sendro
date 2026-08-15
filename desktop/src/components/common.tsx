@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { useAppDispatch } from "../store";
+import type { PreviewTarget } from "../types";
 
 /* ---------- Toggle switch (design: 40×23, violet when on) ---------- */
 
@@ -23,6 +25,50 @@ export function Toggle({
       disabled={disabled}
       onClick={() => onChange(!on)}
     />
+  );
+}
+
+/* ---------- File name that opens the in-app preview ---------- */
+
+/**
+ * A file name anywhere in the app. Clicking opens the preview modal — but
+ * only when we actually know where the file is: an outgoing transfer knows
+ * its source path, an incoming one is guessed inside the receive folder, and
+ * a history row for a send that already left the queue knows neither. In that
+ * case this renders as plain text rather than a button that would open a
+ * "can't find it" card every time.
+ */
+export function FileName({
+  target,
+  label,
+  className,
+}: {
+  target: PreviewTarget | null;
+  label: string;
+  className?: string;
+}) {
+  const dispatch = useAppDispatch();
+
+  if (!target) {
+    return (
+      <span className={className} title={label}>
+        {label}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className={`${className ?? ""} file-name-btn`.trim()}
+      title={`${label} — click to preview`}
+      onClick={(e) => {
+        e.stopPropagation();
+        dispatch({ type: "open-preview", target });
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

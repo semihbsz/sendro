@@ -17,6 +17,7 @@ struct HomeView: View {
     @EnvironmentObject private var discovery: DiscoveryService
     @EnvironmentObject private var pairedHosts: PairedHostStore
     @EnvironmentObject private var history: HistoryStore
+    @EnvironmentObject private var fileStore: FileStore
 
     let openDevices: () -> Void
     let openSettings: () -> Void
@@ -24,6 +25,8 @@ struct HomeView: View {
     let goLibrary: () -> Void
 
     @State private var confirmDeclineAll = false
+    /// Tapping a recent row previews it in place (same screen as Library).
+    @State private var preview: PreviewRequest?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,6 +70,9 @@ struct HomeView: View {
                 engine.declineAll()
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .fullScreenCover(item: $preview) { request in
+            FilePreviewScreen(request: request)
         }
     }
 
@@ -421,16 +427,27 @@ struct HomeView: View {
             } else {
                 VStack(spacing: 8) {
                     ForEach(history.entries.prefix(3)) { entry in
-                        recentRow(entry)
+                        if let request = PreviewResolver.request(for: entry, fileStore: fileStore) {
+                            Button {
+                                preview = request
+                            } label: {
+                                recentRow(entry, source: request.source)
+                            }
+                            .buttonStyle(PressableButtonStyle())
+                        } else {
+                            recentRow(entry,
+                                      source: .gone(wentToPhotos: entry.savedTo == "photos"))
+                        }
                     }
                 }
             }
         }
     }
 
-    private func recentRow(_ entry: HistoryEntry) -> some View {
+    private func recentRow(_ entry: HistoryEntry,
+                           source: PreviewRequest.Source) -> some View {
         HStack(spacing: 12) {
-            FileBadge(fileName: entry.fileName, side: 36, cornerRadius: 11)
+            RowThumbnail(fileName: entry.fileName, source: source, side: 36, cornerRadius: 11)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.fileName)
                     .font(Theme.sans(14, .medium))
@@ -448,6 +465,7 @@ struct HomeView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .glassRow(cornerRadius: 18)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder

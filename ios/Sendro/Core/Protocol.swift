@@ -37,10 +37,31 @@ struct PairStartResponse: Codable {
     let expiresInSeconds: Int
 }
 
+/// §4.2 confirm body.
+///
+/// `deviceName` / `platform` are OPTIONAL on the wire (the host accepts a
+/// confirm without them), but this client always sends them: on the §13 QR
+/// path there is no `pair/start` call, so the host would otherwise have no
+/// name for this iPhone at all. Harmless on the typed path — the host just
+/// sees the same values it already got from `pair/start`.
 struct PairConfirmRequest: Codable {
     let pairingId: String
     let deviceId: String
     let proof: String           // base64url(HMAC-SHA256), no padding
+    var deviceName: String?
+    var platform: String?
+
+    init(pairingId: String,
+         deviceId: String,
+         proof: String,
+         deviceName: String? = nil,
+         platform: String? = "ios") {
+        self.pairingId = pairingId
+        self.deviceId = deviceId
+        self.proof = proof
+        self.deviceName = deviceName
+        self.platform = platform
+    }
 }
 
 struct PairConfirmResponse: Codable {

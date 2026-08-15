@@ -145,3 +145,64 @@ Bulk affordances are client-side loops (PROTOCOL.md §12) over the existing
 single-item commands — `resolve_detected_file` for Watch's "Send all (N)" /
 "Ignore all", `retry_transfer` for Flow's "Retry all failed" — run at most 4
 in flight (`src/bulk.ts`), reporting per-item failures without aborting.
+
+## QR pairing + Sendro Link + hotspot (PROTOCOL.md §13, §14)
+
+```rust
+impl Core {
+    // §13 — open a pairing session for QR display. Same session machinery as
+    // the typed code (same 120 s expiry, same attempt limits); returns the
+    // payload the UI encodes into a QR, plus the code for the typed fallback.
+    pub fn start_qr_pairing(&self) -> QrPairing;
+
+    // §14 — guest link sessions (RAM only, never persisted)
+    pub fn start_link_session(&self, opts: LinkOptions) -> anyhow::Result<LinkSession>;
+    pub fn stop_link_session(&self) -> bool;
+    pub fn link_session(&self) -> Option<LinkSession>;
+    pub fn add_link_files(&self, paths: Vec<PathBuf>) -> anyhow::Result<LinkSession>;
+    pub fn remove_link_file(&self, file_id: Uuid) -> bool;
+
+    // network surface, for the hotspot / no-router screen
+    pub fn network_interfaces(&self) -> Vec<NetIface>;
+}
+
+pub struct QrPairing {
+    pairing_id: Uuid, code: String, salt: String,
+    // one URL per routable address, best candidate first
+    urls: Vec<QrUrl>, expires_in_seconds: u32,
+}
+pub struct QrUrl { address: String, url: String, kind: String } // kind: "lan" | "hotspot" | "other"
+
+pub struct LinkOptions { expires_in_minutes: u32, allow_upload: bool, paths: Vec<PathBuf> }
+pub struct LinkSession {
+    token: String, url: String, urls: Vec<QrUrl>, expires_at_ms: i64,
+    allow_upload: bool, files: Vec<LinkFile>, guest_uploads: u32,
+}
+pub struct LinkFile { file_id: Uuid, file_name: String, size_bytes: u64,
+                      mime_type: String, sha256: Option<String> }
+
+pub struct NetIface { name: String, address: String, kind: String, // "lan" | "hotspot" | "other"
+                      is_up: bool }
+```
+
+New `CoreEvent` variants: `LinkSessionChanged { session: Option<LinkSession> }`,
+`GuestUpload { file_name: String, size_bytes: u64 }`.
+
+Tauri commands (thin wrappers, same names in snake_case):
+```
+start_qr_pairing() -> QrPairing
+start_link_session(opts) / stop_link_session() / link_session() /
+add_link_files(paths) / remove_link_file(id)
+network_interfaces() -> NetIface[]
+preview_file(path) -> Result<PreviewInfo, String>   // desktop-only helper
+```
+
+`preview_file` returns `{ kind: "image" | "video" | "audio" | "pdf" | "text" | "other",
+mimeType, sizeBytes, exists }` so the UI can decide between an inline preview
+(via Tauri's asset protocol) and "Open in default app". The desktop capability
+list must scope `asset:` reads to the receive folder and to files the user
+explicitly sent — never a blanket filesystem grant.
+
+Desktop notifications use `tauri-plugin-notification`
+(`notification:default`, `notification:allow-notify`,
+`notification:allow-request-permission`, `notification:allow-is-permission-granted`).

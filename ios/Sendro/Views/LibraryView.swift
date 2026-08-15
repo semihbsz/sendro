@@ -27,6 +27,7 @@ struct LibraryView: View {
     @State private var exportFile: ReceivedFile?
     @State private var deleteCandidate: ReceivedFile?
     @State private var confirmClearHistory = false
+    @State private var preview: PreviewRequest?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -52,6 +53,9 @@ struct LibraryView: View {
         .sheet(item: $exportFile) { file in
             DocumentExportPicker(url: file.url)
                 .ignoresSafeArea()
+        }
+        .fullScreenCover(item: $preview) { request in
+            FilePreviewScreen(request: request)
         }
         .confirmationDialog("Delete this file?",
                             isPresented: Binding(
@@ -151,14 +155,31 @@ struct LibraryView: View {
                        message: "Send a file from Sendro on your PC and every transfer — saved, failed or declined — shows up here.")
         } else {
             ForEach(history.entries) { entry in
-                historyRow(entry)
+                historyRowButton(entry)
             }
         }
     }
 
-    private func historyRow(_ entry: HistoryEntry) -> some View {
+    /// Completed incoming rows open the preview; everything else (declined,
+    /// failed, outgoing) stays a plain row — there is nothing to show.
+    @ViewBuilder
+    private func historyRowButton(_ entry: HistoryEntry) -> some View {
+        if let request = PreviewResolver.request(for: entry, fileStore: fileStore) {
+            Button {
+                preview = request
+            } label: {
+                historyRow(entry, source: request.source)
+            }
+            .buttonStyle(PressableButtonStyle())
+        } else {
+            historyRow(entry, source: .gone(wentToPhotos: entry.savedTo == "photos"))
+        }
+    }
+
+    private func historyRow(_ entry: HistoryEntry,
+                            source: PreviewRequest.Source) -> some View {
         HStack(spacing: 13) {
-            FileBadge(fileName: entry.fileName, side: 44, cornerRadius: 13)
+            RowThumbnail(fileName: entry.fileName, source: source, side: 44, cornerRadius: 13)
             VStack(alignment: .leading, spacing: 3) {
                 Text(entry.fileName)
                     .font(Theme.sans(15, .medium))
@@ -176,6 +197,7 @@ struct LibraryView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .glassRow(cornerRadius: 20, fillOpacity: 0.05, borderOpacity: 0.08)
+        .contentShape(Rectangle())
     }
 
     private func historySubtitle(_ entry: HistoryEntry) -> String {
@@ -229,9 +251,9 @@ struct LibraryView: View {
                        message: "Media saved to your gallery will be listed here. Find the files themselves in the Photos app — look for the “Sendro” album.")
         } else {
             ForEach(entries) { entry in
-                historyRow(entry)
+                historyRowButton(entry)
             }
-            footnote("These live in the Photos app — look for the “Sendro” album.")
+            footnote("Tap one to preview it here. They also live in the Photos app — look for the “Sendro” album.")
         }
     }
 
@@ -252,20 +274,42 @@ struct LibraryView: View {
 
     private func fileRow(_ file: ReceivedFile) -> some View {
         HStack(spacing: 13) {
-            FileBadge(fileName: file.name, side: 44, cornerRadius: 13)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(file.name)
-                    .font(Theme.sans(15, .medium))
-                    .foregroundColor(Theme.textBase.opacity(0.93))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("\(ByteFormat.string(file.sizeBytes)) · \(file.modified.formatted(date: .abbreviated, time: .shortened))")
-                    .font(Theme.mono(10.5))
-                    .foregroundColor(Theme.textTertiary)
-                    .lineLimit(1)
+            Button {
+                preview = PreviewResolver.request(for: file)
+            } label: {
+                RowThumbnail(fileName: file.name,
+                             source: .file(file.url),
+                             side: 44,
+                             cornerRadius: 13)
             }
-            Spacer()
+            .buttonStyle(PressableButtonStyle())
+            .accessibilityLabel("Preview \(file.name)")
+
+            Button {
+                preview = PreviewResolver.request(for: file)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(file.name)
+                        .font(Theme.sans(15, .medium))
+                        .foregroundColor(Theme.textBase.opacity(0.93))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("\(ByteFormat.string(file.sizeBytes)) · \(file.modified.formatted(date: .abbreviated, time: .shortened))")
+                        .font(Theme.mono(10.5))
+                        .foregroundColor(Theme.textTertiary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableButtonStyle())
+
             Menu {
+                Button {
+                    preview = PreviewResolver.request(for: file)
+                } label: {
+                    Label("Preview", systemImage: "eye")
+                }
                 ShareLink(item: file.url) {
                     Label("Share / Open In…", systemImage: "square.and.arrow.up")
                 }

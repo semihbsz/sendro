@@ -40,6 +40,16 @@ enum AppPaths {
         return dir
     }
 
+    /// Documents/Inbox — where iOS drops files handed to us by the share
+    /// sheet's "Copy to Sendro" / Open-In. The system creates it; we drain it.
+    static var documentsInbox: URL {
+        let base = FileManager.default.urls(for: .documentDirectory,
+                                            in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("Inbox", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     static func partFileURL(transferId: String) -> URL {
         incoming.appendingPathComponent("\(transferId).part", isDirectory: false)
     }

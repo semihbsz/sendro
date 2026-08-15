@@ -34,9 +34,95 @@
 	<string>Sendro saves received photos and videos to your photo library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Sendro needs library access only to file received media into the “Sendro” album.</string>
+	<!-- PROTOCOL.md §13: the pairing QR code is read with the camera. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Sendro scans the pairing QR code shown on your PC.</string>
+
+	<!--
+	  PROTOCOL.md §13 — sendro:// URL scheme.
+	  Scanning the pairing QR with the iOS Camera app (or any QR reader)
+	  opens Sendro straight into the pairing confirmation. The app only ever
+	  accepts such a URL from its own scanner or from an OS URL open, and
+	  always names the PC on a confirmation screen before pairing.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.sendro.pairing</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sendro</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  "Copy to Sendro" in the iOS share sheet.
+
+	  DELIBERATE TRADE-OFF: this is done with document types, NOT with a
+	  Share Extension. A Share Extension has to hand its files to the app
+	  through an App Group container, and App Groups are unavailable to free
+	  personal-team (Apple ID) signing — adding one would break sideloading
+	  for anyone without a paid developer account. Declaring document types
+	  needs no entitlement at all: Sendro appears in the share sheet's
+	  "Copy to…" / Open-In list, iOS drops the file into Documents/Inbox and
+	  calls the app's URL handler, which queues it on the Send tab.
+	  A paid account would allow the richer extension (in-sheet UI, no app
+	  switch); see ios/README.md.
+	-->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Image</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.image</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Movie</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.movie</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Any File</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
+
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!--
+	  Live Activity for big transfers (Dynamic Island / Lock Screen), hosted
+	  by the SendroActivity widget extension. ActivityKit needs no App Group
+	  and no paid entitlement.
+	-->
+	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>

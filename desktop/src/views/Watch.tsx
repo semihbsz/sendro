@@ -4,7 +4,7 @@ import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
 import { baseName, formatBytes } from "../format";
 import { IconFile, IconTrash, IconWatch } from "../icons";
-import { EmptyState, Toggle } from "../components/common";
+import { EmptyState, FileName, Toggle } from "../components/common";
 import { Modal } from "../components/Modal";
 import { mapLimited } from "../bulk";
 import type { WatchFolderConfig } from "../types";
@@ -143,7 +143,12 @@ export function Watch() {
           </div>
           <div className="detect-main">
             <div className="detect-title">
-              New export detected · {d.fileName}
+              New export detected ·{" "}
+              <FileName
+                className="detect-file"
+                label={d.fileName}
+                target={{ path: d.path, fileName: d.fileName }}
+              />
             </div>
             <div className="detect-sub">
               {formatBytes(d.sizeBytes)} · {d.path}

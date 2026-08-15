@@ -3,6 +3,8 @@ import * as api from "../api";
 import { formatBytes, formatEta, formatPercent, formatSpeed } from "../format";
 import { IconRetry, IconX } from "../icons";
 import { PhasePill, ProgressRing, Sparkline, ringFraction } from "./transfer";
+import { FileName } from "./common";
+import { targetForTransfer } from "../preview";
 import type { TransferSummary } from "../types";
 
 export const RETRYABLE = new Set(["failed", "interrupted", "expired"]);
@@ -45,7 +47,7 @@ function metaLine(t: TransferSummary, paused: boolean): string {
 
 /** Compact in-flight card: ring, phase pill, live meta, sparkline, actions. */
 export function TransferCard({ t }: { t: TransferSummary }) {
-  const { paused, speedSamples } = useAppState();
+  const { paused, speedSamples, settings } = useAppState();
   const pct = Math.round(ringFraction(t) * 100);
   const showPct =
     t.state === "transferring"
@@ -64,9 +66,11 @@ export function TransferCard({ t }: { t: TransferSummary }) {
         </div>
         <div className="mini-main">
           <div className="mini-title-row">
-            <div className="mini-name" title={t.fileName}>
-              {t.fileName}
-            </div>
+            <FileName
+              className="mini-name"
+              label={t.fileName}
+              target={targetForTransfer(t, settings?.receiveDir ?? null)}
+            />
             <PhasePill t={t} paused={paused} />
           </div>
           <div className="mini-meta">

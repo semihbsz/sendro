@@ -7,11 +7,12 @@
 //! * system tray + minimize-to-tray + autostart.
 
 mod commands;
+mod preview;
 mod tray;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use serde::Deserialize;
@@ -29,6 +30,24 @@ pub struct AppState {
     pub core: Arc<Core>,
     /// UI-facing mirror of the core's global pause gate (core exposes no getter).
     pub paused: AtomicBool,
+    /// Paths the local user explicitly handed to Sendro this session. The
+    /// preview commands will not touch anything that is neither in here nor
+    /// inside the receive folder — see `preview.rs`.
+    pub preview_paths: Mutex<preview::PathRegistry>,
+}
+
+impl AppState {
+    /// Remember paths as previewable. The lock is taken and released here, so
+    /// no caller ever holds it across an `.await`.
+    pub fn remember_previewable(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut registry = self
+            .preview_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for path in paths {
+            registry.insert(path);
+        }
+    }
 }
 
 /// Minimal, tolerant mirror of the core `Settings` JSON, used only to build
@@ -124,6 +143,7 @@ fn setup(app: &tauri::App) -> anyhow::Result<()> {
     app.manage(AppState {
         core: Arc::clone(&core),
         paused: AtomicBool::new(false),
+        preview_paths: Mutex::new(preview::PathRegistry::default()),
     });
 
     tray::create_tray(app.handle())?;
@@ -143,6 +163,7 @@ fn setup(app: &tauri::App) -> anyhow::Result<()> {
                     ) {
                         show_main_window(&handle);
                     }
+                    remember_event_paths(&handle, &event);
                     if let Err(err) = handle.emit("core-event", &event) {
                         log::warn!("failed to emit core-event: {err}");
                     }
@@ -158,11 +179,32 @@ fn setup(app: &tauri::App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Paths the *core* tells us about are paths the local user already sees in
+/// the UI, so they become previewable: a watch-folder detection, and the
+/// source path of any transfer. Nothing else ever enters the registry.
+fn remember_event_paths(app: &AppHandle, event: &CoreEvent) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    match event {
+        CoreEvent::WatchFileDetected { path, .. } => {
+            state.remember_previewable([PathBuf::from(path)]);
+        }
+        CoreEvent::TransferUpdated { transfer } => {
+            if let Some(source) = transfer.source_path.as_ref() {
+                state.remember_previewable([PathBuf::from(source)]);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -212,6 +254,18 @@ pub fn run() {
             commands::dismiss_message,
             commands::clear_messages,
             commands::paste_clipboard_image,
+            commands::start_qr_pairing,
+            commands::start_link_session,
+            commands::stop_link_session,
+            commands::link_session,
+            commands::add_link_files,
+            commands::remove_link_file,
+            commands::network_interfaces,
+            commands::show_window,
+            preview::preview_file,
+            preview::read_text_preview,
+            preview::open_previewed_file,
+            preview::reveal_previewed_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Sendro");
