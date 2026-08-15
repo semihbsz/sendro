@@ -86,6 +86,23 @@ export interface Settings {
   minimizeToTray: boolean;
 }
 
+/**
+ * An ephemeral text message received from a paired device (PROTOCOL.md §11).
+ * RAM only on both sides — never persisted, never shown in history.
+ */
+export interface IncomingMessage {
+  messageId: string;
+  text: string;
+  senderName: string;
+  receivedAtMs: number;
+}
+
+/** §11: max UTF-8 length of a message body, in bytes. */
+export const MAX_MESSAGE_BYTES = 32 * 1024;
+
+/** §11: how many received message cards are kept on screen. */
+export const MAX_MESSAGE_CARDS = 20;
+
 /** CoreEvent — serde `#[serde(tag = "type", rename_all = "camelCase")]`. */
 export type CoreEvent =
   | {
@@ -105,6 +122,13 @@ export type CoreEvent =
       fileName: string;
       sizeBytes: number;
       auto: boolean;
+    }
+  | {
+      type: "messageReceived";
+      messageId: string;
+      text: string;
+      senderName: string;
+      receivedAtMs: number;
     }
   | { type: "serverStarted"; port: number };
 

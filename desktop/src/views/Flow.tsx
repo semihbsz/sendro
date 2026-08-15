@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
+import { mapLimited } from "../bulk";
 import {
   formatBytes,
   formatDuration,
@@ -13,7 +15,7 @@ import {
   IconFlow,
 } from "../icons";
 import { EmptyState } from "../components/common";
-import { TransferCard, CANCELABLE } from "../components/TransferCard";
+import { TransferCard, CANCELABLE, RETRYABLE } from "../components/TransferCard";
 import { PhasePill, ProgressRing, Sparkline, ringFraction } from "../components/transfer";
 import { isTerminal, type HistoryEntry, type TransferSummary } from "../types";
 
@@ -132,11 +134,17 @@ function VerifiedCell({ h }: { h: HistoryEntry }) {
 export function Flow() {
   const { queue, history, paused } = useAppState();
   const dispatch = useAppDispatch();
+  const [retryingAll, setRetryingAll] = useState(false);
 
   const active = queue.filter((t) => !isTerminal(t.state));
   const doneInQueue = queue.filter((t) => isTerminal(t.state));
   const needsAttention = doneInQueue.filter(
     (t) => t.state !== "completed",
+  );
+  // Interrupted transfers stay in `active`, so scan the whole queue for
+  // anything the per-item Retry button would accept.
+  const retryable = queue.filter(
+    (t) => t.direction === "outgoing" && RETRYABLE.has(t.state),
   );
 
   // Hero: prefer the transfer that's actually moving.
@@ -172,12 +180,50 @@ export function Flow() {
     }
   };
 
+  /** Re-offer every failed/interrupted/expired send — §12's loop, not a
+   *  batch call, so one stubborn file cannot block the others. */
+  const retryAllFailed = async () => {
+    if (retryable.length === 0) return;
+    setRetryingAll(true);
+    try {
+      const failures = await mapLimited(retryable, 4, (t) =>
+        api.retryTransfer(t.transferId),
+      );
+      if (failures.length > 0) {
+        console.error(`${failures.length} transfers could not be retried`);
+      }
+      const next = await api.getQueue();
+      dispatch({ type: "set-queue", queue: next });
+    } catch (err) {
+      console.error("retry all failed", err);
+    } finally {
+      setRetryingAll(false);
+    }
+  };
+
   return (
     <div className="page" key="flow">
       <div className="page-title">Flow</div>
       <div className="page-sub">{summary}</div>
 
       {hero ? <FlowHero t={hero} /> : null}
+
+      {retryable.length > 1 ? (
+        <div className="bulk-bar">
+          <span className="bulk-count">
+            {retryable.length} sends stalled — failed, interrupted or expired
+          </span>
+          <span className="bulk-spacer" />
+          <button
+            className="btn-solid btn-sm"
+            disabled={retryingAll}
+            title="Re-offer every stalled send, one call each"
+            onClick={() => void retryAllFailed()}
+          >
+            Retry all failed ({retryable.length})
+          </button>
+        </div>
+      ) : null}
 
       {rest.length > 0 ? (
         <div className="mini-list" style={{ marginTop: hero ? 10 : 22 }}>

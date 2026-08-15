@@ -135,8 +135,12 @@ fn setup(app: &tauri::App) -> anyhow::Result<()> {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    // Surface the pairing code even when minimized to tray.
-                    if matches!(event, CoreEvent::PairingStarted { .. }) {
+                    // Surface the pairing code — and an incoming text card —
+                    // even when minimized to tray.
+                    if matches!(
+                        event,
+                        CoreEvent::PairingStarted { .. } | CoreEvent::MessageReceived { .. }
+                    ) {
                         show_main_window(&handle);
                     }
                     if let Err(err) = handle.emit("core-event", &event) {
@@ -158,6 +162,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -202,6 +207,11 @@ pub fn run() {
             commands::remove_watch_folder,
             commands::resolve_detected_file,
             commands::open_receive_folder,
+            commands::send_message,
+            commands::incoming_messages,
+            commands::dismiss_message,
+            commands::clear_messages,
+            commands::paste_clipboard_image,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Sendro");

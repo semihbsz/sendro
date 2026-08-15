@@ -1,8 +1,10 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
-import { IconDrop, IconShieldCheck } from "../icons";
+import { IconDrop, IconSend, IconShieldCheck } from "../icons";
 import { formatBytes, isOnline } from "../format";
 import { TransferCard } from "../components/TransferCard";
+import { readClipboardForSend } from "../paste";
 import { isTerminal } from "../types";
 
 async function pickFiles(): Promise<string[] | null> {
@@ -17,9 +19,38 @@ async function pickFolder(): Promise<string[] | null> {
   return Array.isArray(selected) ? selected : [selected];
 }
 
+/** True when the keystroke belongs to a field the user is typing into. */
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
 export function Send() {
-  const { devices, queue, history, dragging } = useAppState();
+  const { devices, queue, history, dragging, pendingPaths, composerText } =
+    useAppState();
   const dispatch = useAppDispatch();
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
+  const [pasting, setPasting] = useState(false);
+  const hintTimer = useRef<number | null>(null);
+
+  const showHint = useCallback((message: string) => {
+    setPasteHint(message);
+    if (hintTimer.current !== null) window.clearTimeout(hintTimer.current);
+    hintTimer.current = window.setTimeout(() => setPasteHint(null), 2400);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (hintTimer.current !== null) window.clearTimeout(hintTimer.current);
+    },
+    [],
+  );
 
   const choose = async (picker: () => Promise<string[] | null>) => {
     try {
@@ -31,6 +62,46 @@ export function Send() {
       console.error("file picker failed", err);
     }
   };
+
+  /** Paste button / Ctrl+V: image → offer flow, text → composer. */
+  const paste = useCallback(async () => {
+    if (pasting) return;
+    setPasting(true);
+    try {
+      const result = await readClipboardForSend();
+      if (result.kind === "image") {
+        dispatch({ type: "set-pending", paths: [result.path] });
+      } else if (result.kind === "text") {
+        dispatch({ type: "open-composer", text: result.text });
+      } else if (result.kind === "error") {
+        console.error("clipboard paste failed", result.message);
+        showHint("Couldn't read the clipboard");
+      } else {
+        showHint("Clipboard is empty");
+      }
+    } catch (err) {
+      // Belt and braces — readClipboardForSend already swallows failures.
+      console.error("clipboard paste failed", err);
+      showHint("Couldn't read the clipboard");
+    } finally {
+      setPasting(false);
+    }
+  }, [dispatch, pasting, showHint]);
+
+  // Ctrl/Cmd+V anywhere on the SEND view does what the Paste button does —
+  // unless a field has focus (native paste) or a modal already owns input.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "v" && e.key !== "V") return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (isEditable(e.target)) return;
+      if (composerText !== null || pendingPaths !== null) return;
+      e.preventDefault();
+      void paste();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [paste, composerText, pendingPaths]);
 
   const onlineDevices = devices.filter((d) => isOnline(d.lastSeenMs));
   const active = queue.filter((t) => !isTerminal(t.state));
@@ -111,6 +182,34 @@ export function Send() {
           >
             Choose folder
           </button>
+          <button
+            className="btn-glass"
+            disabled={pasting}
+            title="Paste an image or text from the clipboard (Ctrl+V)"
+            onClick={(e) => {
+              e.stopPropagation();
+              void paste();
+            }}
+          >
+            Paste
+          </button>
+        </div>
+        <div className="hero-foot">
+          <button
+            className="btn-ghost-text hero-text-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              dispatch({ type: "open-composer", text: "" });
+            }}
+          >
+            <IconSend size={12} />
+            Send text
+          </button>
+          {pasteHint ? (
+            <span className="paste-hint">{pasteHint}</span>
+          ) : (
+            <span className="hero-foot-hint">Ctrl+V pastes here</span>
+          )}
         </div>
       </div>
 

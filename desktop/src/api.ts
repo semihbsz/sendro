@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   HistoryEntry,
   HostInfo,
+  IncomingMessage,
   Settings,
   TransferSummary,
   TrustedDevice,
@@ -49,3 +50,21 @@ export const resolveDetectedFile = (detectionId: string, send: boolean) =>
   invoke<void>("resolve_detected_file", { detectionId, send });
 
 export const openReceiveFolder = () => invoke<void>("open_receive_folder");
+
+/* -- Ephemeral text messages (PROTOCOL.md §11) — never persisted -- */
+
+export const sendMessage = (deviceId: string, text: string) =>
+  invoke<void>("send_message", { deviceId, text });
+export const incomingMessages = () =>
+  invoke<IncomingMessage[]>("incoming_messages");
+export const dismissMessage = (id: string) =>
+  invoke<boolean>("dismiss_message", { id });
+export const clearMessages = () => invoke<void>("clear_messages");
+
+/**
+ * Reads a bitmap off the clipboard and encodes it to a PNG in the OS temp
+ * dir, returning its path — or `null` when the clipboard holds no image.
+ * Pixels are read and encoded in Rust; they never cross the IPC boundary.
+ */
+export const pasteClipboardImage = (stamp: string) =>
+  invoke<string | null>("paste_clipboard_image", { stamp });

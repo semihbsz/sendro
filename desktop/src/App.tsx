@@ -9,6 +9,8 @@ import { Rail } from "./components/Rail";
 import { TopBar } from "./components/TopBar";
 import { PairingModal } from "./components/PairingModal";
 import { DevicePicker } from "./components/DevicePicker";
+import { MessageCards } from "./components/MessageCards";
+import { TextComposer } from "./components/TextComposer";
 import { Send } from "./views/Send";
 import { Flow } from "./views/Flow";
 import { Watch } from "./views/Watch";
@@ -108,8 +110,10 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      <MessageCards />
       <PairingModal />
       <DevicePicker />
+      <TextComposer />
     </div>
   );
 }

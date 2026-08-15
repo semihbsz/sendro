@@ -2,9 +2,11 @@
 //  RootView.swift
 //  Sendro
 //
-//  New shell: a single receive surface (Home) + Library, a floating glass
-//  tab bar, the Devices sheet (discovery / pairing / manual connect), the
-//  Settings sheet, and the full-screen Flight view for a live transfer.
+//  New shell: three peer surfaces — Receive · Send · Library — behind a
+//  floating glass tab bar, plus the Devices sheet (discovery / pairing /
+//  manual connect), the Settings sheet, the full-screen Flight view for a
+//  live transfer, and the ephemeral message card stack that floats over
+//  whichever tab is showing.
 //
 
 import SwiftUI
@@ -23,18 +25,21 @@ struct RootView: View {
 
     enum Tab {
         case receive
+        case send
         case library
     }
 
     @EnvironmentObject private var engine: TransferEngine
     @EnvironmentObject private var discovery: DiscoveryService
+    @EnvironmentObject private var messages: MessageCenter
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var tab: Tab = .receive
     @State private var showDevices = false
     @State private var showSettings = false
-    @State private var showSend = false
     @State private var flight: FlightRef?
+    /// Lives here (not in SendView) so the chosen target survives tab switches.
+    @State private var sendTargetId: String?
 
     var body: some View {
         ZStack {
@@ -45,9 +50,11 @@ struct RootView: View {
                 case .receive:
                     HomeView(openDevices: { showDevices = true },
                              openSettings: { showSettings = true },
-                             openSend: { showSend = true },
                              openFlight: { ref in flight = ref },
                              goLibrary: { withAnimation(.easeOut(duration: 0.2)) { tab = .library } })
+                case .send:
+                    SendView(targetHostId: $sendTargetId,
+                             openDevices: { showDevices = true })
                 case .library:
                     LibraryView()
                 }
@@ -60,6 +67,10 @@ struct RootView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 10)
+
+            // Ephemeral text (§11) — above the tabs, top-anchored, over
+            // whatever surface is showing.
+            MessageInboxOverlay()
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showDevices) {
@@ -67,9 +78,6 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
-        }
-        .sheet(isPresented: $showSend) {
-            SendSheet()
         }
         .fullScreenCover(item: $flight) { ref in
             FlightView(flightRef: ref)
@@ -93,13 +101,19 @@ struct RootView: View {
 
     // MARK: Floating glass tab bar
 
+    /// Three tabs have to fit inside 320pt: 20pt page margins, 5pt inner
+    /// padding and 6pt gaps leave ~86pt per tab, and the labels below (14pt
+    /// glyph + 6pt + a ≤52pt caption) come in well under that. The pending
+    /// badge is an overlay on the glyph, so it costs no width.
     private var tabBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             tabButton(.receive, title: "Receive", systemImage: "tray.and.arrow.down",
-                      showsDot: !engine.incomingOffers.isEmpty && tab != .receive)
+                      showsDot: messages.hasMessages
+                                || (!engine.incomingOffers.isEmpty && tab != .receive))
+            tabButton(.send, title: "Send", systemImage: "paperplane")
             tabButton(.library, title: "Library", systemImage: "folder")
         }
-        .padding(6)
+        .padding(5)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(Color.white.opacity(0.07))
@@ -119,16 +133,21 @@ struct RootView: View {
         return Button {
             withAnimation(.easeOut(duration: 0.2)) { tab = target }
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
+                    .overlay(alignment: .topTrailing) {
+                        if showsDot {
+                            Circle()
+                                .fill(Theme.iris)
+                                .frame(width: 6, height: 6)
+                                .offset(x: 4, y: -3)
+                        }
+                    }
                 Text(title)
-                    .font(Theme.sans(13, .semibold))
-                if showsDot {
-                    Circle()
-                        .fill(Theme.iris)
-                        .frame(width: 6, height: 6)
-                }
+                    .font(Theme.sans(12.5, .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundColor(selected ? Theme.textBase : Theme.textBase.opacity(0.45))
             .frame(maxWidth: .infinity)
@@ -137,6 +156,7 @@ struct RootView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(selected ? Color.white.opacity(0.12) : Color.clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(PressableButtonStyle())
     }

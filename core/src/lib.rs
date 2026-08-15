@@ -11,6 +11,7 @@ pub mod events;
 pub mod filename;
 pub mod hashing;
 pub mod history;
+pub mod messages;
 pub mod pairing;
 pub mod range;
 pub mod server;
@@ -19,7 +20,7 @@ pub mod transfers;
 pub mod types;
 pub mod watch;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,8 +36,8 @@ use uuid::Uuid;
 pub use config::CoreConfig;
 pub use events::CoreEvent;
 pub use types::{
-    DiscoveredHost, HistoryEntry, HostInfo, Settings, TransferState, TransferSummary,
-    TrustedDevice, WatchFolderConfig,
+    DiscoveredHost, HistoryEntry, HostInfo, IncomingMessage, Message, Settings, TransferState,
+    TransferSummary, TrustedDevice, WatchFolderConfig,
 };
 
 use state::{Identity, StoredDevice};
@@ -62,6 +63,13 @@ pub struct Core {
     pub(crate) paused: AtomicBool,
     /// transfer_id → number of currently open download streams for it.
     pub(crate) active_streams: Mutex<HashMap<Uuid, usize>>,
+
+    /// §11 ephemeral text, host → client. Per-device in-memory inbox, capped
+    /// at [`messages::MAX_INBOX`], drained on outbox read. NEVER persisted.
+    pub(crate) message_inbox: RwLock<HashMap<Uuid, VecDeque<Message>>>,
+    /// §11.2 ephemeral text, client → host. Held only until the user
+    /// dismisses the card. NEVER persisted, never in history.
+    pub(crate) incoming: RwLock<VecDeque<IncomingMessage>>,
 
     pub(crate) history: RwLock<Vec<HistoryEntry>>,
     pub(crate) watch_folders: RwLock<Vec<WatchFolderConfig>>,
@@ -150,6 +158,8 @@ impl Core {
             outbox_notify: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
             active_streams: Mutex::new(HashMap::new()),
+            message_inbox: RwLock::new(HashMap::new()),
+            incoming: RwLock::new(VecDeque::new()),
             history: RwLock::new(history),
             watch_folders: RwLock::new(watch_folders),
             pending_detections: Mutex::new(HashMap::new()),

@@ -202,11 +202,43 @@ pub struct TransferWire {
     pub auto_accept: bool,
 }
 
-/// `GET /api/v1/outbox` response — §6.2.
+/// Canonical Message JSON — §11, ephemeral text. Never persisted, never
+/// written to history, never logged with its contents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub message_id: Uuid,
+    pub text: String,
+    pub sent_at_ms: i64,
+    pub sender_name: String,
+}
+
+/// A message received *from* a paired device, held in RAM for the host UI
+/// (§11.2). Dismissing it frees the memory; nothing about it is persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingMessage {
+    pub message_id: Uuid,
+    pub text: String,
+    pub sender_name: String,
+    pub received_at_ms: i64,
+}
+
+/// `POST /api/v1/messages` request — §11.2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageRequest {
+    pub text: String,
+}
+
+/// `GET /api/v1/outbox` response — §6.2 + §11.1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxResponse {
     pub offers: Vec<TransferWire>,
+    /// Ephemeral text messages, drained on read (at-most-once delivery).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Message>,
 }
 
 /// `POST /api/v1/transfers/{id}/status` request — §6.5.

@@ -136,6 +136,27 @@ struct SendroClient {
         try await post("/api/v1/transfers/\(transferId)/status", body: report, timeout: 10)
     }
 
+    /// §11.2 — send an ephemeral text message to the host. Nothing about the
+    /// text is cached or persisted here; it exists only for the duration of
+    /// this request.
+    @discardableResult
+    func sendMessage(text: String) async throws -> OkResponse {
+        do {
+            let response: OkResponse = try await post("/api/v1/messages",
+                                                      body: SendMessageRequest(text: text),
+                                                      timeout: 15)
+            return response
+        } catch let error as SendroClientError {
+            if error.httpStatus == 413 {
+                throw SendroClientError.http(
+                    status: 413,
+                    code: "bad_request",
+                    message: "Message too long — the limit is 32 KB of text.")
+            }
+            throw error
+        }
+    }
+
     /// Build the GET request for the file bytes (PROTOCOL.md §6.4).
     /// `rangeStart` != nil resumes from that offset with an If-Range guard.
     func makeFileRequest(transferId: String, rangeStart: Int64?, sha256: String) -> URLRequest {

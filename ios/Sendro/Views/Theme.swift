@@ -25,6 +25,13 @@ enum Theme {
     static let irisSoft    = Color(red: 0x95 / 255, green: 0xB6 / 255, blue: 0xFF / 255)
     static let irisBright  = Color(red: 0xA8 / 255, green: 0xC4 / 255, blue: 0xFF / 255)
     static let teal        = Color(red: 0x37 / 255, green: 0xE6 / 255, blue: 0xC4 / 255)
+    /// Beam gradient ends — these three are the app icon's stroke gradient
+    /// (see scripts/generate_icons.py): #1FB78F → #37E6C4 → #6BF2D6.
+    static let tealDeep    = Color(red: 0x1F / 255, green: 0xB7 / 255, blue: 0x8F / 255)
+    static let tealBright  = Color(red: 0x6B / 255, green: 0xF2 / 255, blue: 0xD6 / 255)
+    /// The icon tile's background gradient: #151A21 → #0A0C10.
+    static let markTileTop    = Color(red: 0x15 / 255, green: 0x1A / 255, blue: 0x21 / 255)
+    static let markTileBottom = Color(red: 0x0A / 255, green: 0x0C / 255, blue: 0x10 / 255)
     static let danger      = Color(red: 1.0,        green: 0x78 / 255, blue: 0x78 / 255)
     static let warn        = Color(red: 1.0,        green: 0xB8 / 255, blue: 0x6B / 255)
 
@@ -258,51 +265,103 @@ struct HatchPattern: View {
     }
 }
 
-// MARK: - Beam mark
+// MARK: - Beam mark (must match the shipped app icon)
 
-/// The Sendro beam mark: an S-curve beam with a terminal dot, drawn as a
-/// Path (no assets). Stroke it in white on an iris gradient tile.
+/// The Sendro beam: the exact path the icon pipeline draws
+/// (scripts/generate_icons.py), `M 252 708 C 560 708, 452 316, 700 316`,
+/// expressed in the icon's 1024 × 1024 design space and scaled into the
+/// view's rect. Stroke it 88/1024 wide with round caps.
 struct BeamMarkShape: Shape {
+
+    /// The icon's design canvas — every constant below is in this space.
+    static let canvas: CGFloat = 1024
+
     func path(in rect: CGRect) -> Path {
+        let unit = min(rect.width, rect.height) / Self.canvas
+        // Centre the 1024-square inside a non-square rect so the geometry
+        // never skews.
+        let originX = rect.minX + (rect.width - Self.canvas * unit) / 2
+        let originY = rect.minY + (rect.height - Self.canvas * unit) / 2
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: originX + x * unit, y: originY + y * unit)
+        }
         var path = Path()
-        let w = rect.width
-        let h = rect.height
-        // S-curve rising from bottom-left to upper-right.
-        path.move(to: CGPoint(x: rect.minX + 0.18 * w, y: rect.minY + 0.82 * h))
-        path.addCurve(to: CGPoint(x: rect.minX + 0.5 * w, y: rect.minY + 0.5 * h),
-                      control1: CGPoint(x: rect.minX + 0.62 * w, y: rect.minY + 0.94 * h),
-                      control2: CGPoint(x: rect.minX + 0.24 * w, y: rect.minY + 0.48 * h))
-        path.addCurve(to: CGPoint(x: rect.minX + 0.74 * w, y: rect.minY + 0.26 * h),
-                      control1: CGPoint(x: rect.minX + 0.76 * w, y: rect.minY + 0.52 * h),
-                      control2: CGPoint(x: rect.minX + 0.44 * w, y: rect.minY + 0.18 * h))
+        path.move(to: point(252, 708))
+        path.addCurve(to: point(700, 316),
+                      control1: point(560, 708),
+                      control2: point(452, 316))
         return path
     }
 }
 
-/// App-icon-like tile: rounded square, iris gradient, beam + dot.
+/// The app mark, pixel-faithful to the home-screen icon: the #151A21→#0A0C10
+/// tile with its teal ambient glow, the gradient beam (#1FB78F → #37E6C4 →
+/// #6BF2D6), the bright destination dot at (806, 316) r 42, and the 6/1024
+/// hairline edge — all in the icon's 1024 space, scaled to `side`.
 struct BeamMark: View {
+
     var side: CGFloat = 28
+
+    /// One unit of the icon's 1024-space, in points.
+    private var unit: CGFloat { side / BeamMarkShape.canvas }
+    private var corner: CGFloat { 228 * unit }
+
+    /// Offset of the destination dot's centre from the tile's centre.
+    private var dotOffset: CGSize {
+        CGSize(width: (806 - 512) * unit, height: (316 - 512) * unit)
+    }
+
+    private var beamGradient: LinearGradient {
+        LinearGradient(gradient: Gradient(stops: [
+            Gradient.Stop(color: Theme.tealDeep, location: 0),
+            Gradient.Stop(color: Theme.teal, location: 0.62),
+            Gradient.Stop(color: Theme.tealBright, location: 1)
+        ]),
+        startPoint: UnitPoint(x: 300 / BeamMarkShape.canvas, y: 712 / BeamMarkShape.canvas),
+        endPoint: UnitPoint(x: 756 / BeamMarkShape.canvas, y: 312 / BeamMarkShape.canvas))
+    }
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: side * 0.29, style: .continuous)
-                .fill(LinearGradient(colors: [Theme.iris, Theme.bgGlow],
-                                     startPoint: .topLeading,
-                                     endPoint: .bottomTrailing))
+            // Tile: vertical gradient + the faint teal ambient wash.
+            LinearGradient(colors: [Theme.markTileTop, Theme.markTileBottom],
+                           startPoint: .top, endPoint: .bottom)
+                .overlay(
+                    RadialGradient(gradient: Gradient(stops: [
+                        Gradient.Stop(color: Theme.teal.opacity(0.10), location: 0),
+                        Gradient.Stop(color: Theme.teal.opacity(0.03), location: 0.55),
+                        Gradient.Stop(color: Theme.teal.opacity(0), location: 1)
+                    ]),
+                    center: UnitPoint(x: 0.5, y: 330 / BeamMarkShape.canvas),
+                    startRadius: 0,
+                    endRadius: 620 * unit)
+                )
+
+            // Glow pass (stroke-width 92 @ 0.32 + dot r 46 @ 0.35, blurred).
             BeamMarkShape()
-                .stroke(Color.white,
-                        style: StrokeStyle(lineWidth: max(1.6, side * 0.09),
-                                           lineCap: .round))
-                .frame(width: side * 0.86, height: side * 0.86)
+                .stroke(Theme.teal.opacity(0.32),
+                        style: StrokeStyle(lineWidth: 92 * unit, lineCap: .round))
+                .blur(radius: 22 * unit)
             Circle()
-                .fill(Theme.teal)
-                .frame(width: side * 0.14, height: side * 0.14)
-                .offset(x: side * 0.27, y: -side * 0.27)
+                .fill(Theme.teal.opacity(0.35))
+                .frame(width: 92 * unit, height: 92 * unit)
+                .offset(x: dotOffset.width, y: dotOffset.height)
+                .blur(radius: 22 * unit)
+
+            // The mark itself.
+            BeamMarkShape()
+                .stroke(beamGradient,
+                        style: StrokeStyle(lineWidth: 88 * unit, lineCap: .round))
+            Circle()
+                .fill(Theme.tealBright)
+                .frame(width: 84 * unit, height: 84 * unit)
+                .offset(x: dotOffset.width, y: dotOffset.height)
         }
         .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: side * 0.29, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.055), lineWidth: 6 * unit)
         )
     }
 }

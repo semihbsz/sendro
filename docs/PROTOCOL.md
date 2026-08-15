@@ -242,3 +242,67 @@ concept, surfaced in status reports).
 
 Client checks `protocolVersion` from `/api/v1/info` (or TXT `v`). If the
 major version is unknown, show "Update Sendro" — do not attempt transfer.
+
+## 11. Text messages (ephemeral clipboard bridge)
+
+Sendro can send a short text payload between paired devices — for pasting a
+link, a caption, a code, a path. **Messages are never written to disk on
+either side and are never added to history.** They live in RAM only, are
+delivered at most once, and disappear when the receiving user dismisses
+them (or when the app quits).
+
+Message JSON:
+```json
+{
+  "messageId": "uuid",
+  "text": "https://example.com/whatever",
+  "sentAtMs": 1755073000000,
+  "senderName": "Semih-PC"
+}
+```
+
+Limits: `text` is UTF-8, max **32 KiB** encoded. Longer input is rejected
+with `413` + `{"error":"bad_request","message":"message too long"}`.
+A device's in-memory inbox holds at most **20** undelivered messages;
+pushing past that drops the oldest.
+
+### 11.1 Host → client
+
+Messages ride the existing outbox long poll (§6.2). The response gains a
+`messages` array (absent or empty when there are none):
+
+```json
+{ "offers": [ ... ], "messages": [ Message, ... ] }
+```
+
+Delivery is **at-most-once**: the host removes a message from the device's
+inbox the moment it is written into an outbox response. It is not retried
+and not persisted — this is deliberate (a message is a clipboard hop, not
+a mailbox). A message pending for a device makes the long poll return
+immediately, exactly like a pending offer.
+
+### 11.2 Client → host
+
+`POST /api/v1/messages` (authenticated)
+```json
+{ "text": "one two three" }
+```
+→ `200 {"ok":true}`. The host surfaces it as a transient in-app card
+(sender name + text + Copy + Dismiss) and holds it in memory only; closing
+the card discards it. Same 32 KiB limit and `413` behaviour.
+
+### 11.3 UI contract (both apps)
+
+- Incoming message appears as a card: "<sender> sent you text", the text
+  itself (selectable, scrollable if long), a **Copy** button, and a
+  **Dismiss/Close** button that removes it permanently.
+- Copy writes to the OS clipboard. Dismiss frees the memory.
+- Nothing about the message is logged, persisted, or shown in history.
+
+## 12. Bulk accept
+
+Accepting many offers is a client-side loop over §6.3
+(`POST /api/v1/transfers/{id}/accept`) — there is no batch endpoint, so a
+partial failure only affects the individual transfer. Clients that expose
+an "Accept all" affordance must issue the calls with bounded concurrency
+(≤4 in flight) and report per-item failures without aborting the rest.

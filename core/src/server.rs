@@ -34,6 +34,11 @@ use crate::{Core, CoreEvent};
 
 const MAX_OUTBOX_WAIT_SECS: u64 = 30;
 
+/// JSON envelope slack on top of the 32 KiB text limit (§11): escaping can
+/// inflate the encoded text, so the body is allowed to be a little larger
+/// before it is refused outright.
+const MAX_MESSAGE_BODY_BYTES: usize = crate::messages::MAX_MESSAGE_BYTES * 8;
+
 pub fn build_router(core: Arc<Core>) -> Router {
     let open = Router::new()
         .route("/api/v1/info", get(info))
@@ -47,6 +52,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/v1/transfers/:id/reject", post(reject_transfer))
         .route("/api/v1/transfers/:id/status", post(report_status))
         .route("/api/v1/transfers/:id/file", get(download_file))
+        .route("/api/v1/messages", post(post_message))
         .route(
             "/api/v1/upload",
             post(upload).layer(DefaultBodyLimit::disable()),
@@ -227,13 +233,20 @@ async fn outbox(
     let deadline = Instant::now() + wait;
     let notify = core.notify_handle(device.device_id);
     loop {
+        // Draining an empty inbox is a no-op, so it is safe to do this on
+        // every pass; a non-empty drain means we must return right away
+        // (delivery is at-most-once — §11.1).
         let offers = core.pending_offers_for(device.device_id);
-        if !offers.is_empty() {
-            return Json(OutboxResponse { offers });
+        let messages = core.drain_messages_for(device.device_id);
+        if !offers.is_empty() || !messages.is_empty() {
+            return Json(OutboxResponse { offers, messages });
         }
         let now = Instant::now();
         if now >= deadline {
-            return Json(OutboxResponse { offers: Vec::new() });
+            return Json(OutboxResponse {
+                offers: Vec::new(),
+                messages: Vec::new(),
+            });
         }
         // Arm the waiter *before* re-checking so a publish between the check
         // above and the await below still wakes us.
@@ -242,10 +255,49 @@ async fn outbox(
             _ = notified => {}
             _ = tokio::time::sleep(deadline - now) => {
                 let offers = core.pending_offers_for(device.device_id);
-                return Json(OutboxResponse { offers });
+                let messages = core.drain_messages_for(device.device_id);
+                return Json(OutboxResponse { offers, messages });
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// §11.2 messages (iPhone → Windows), ephemeral
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/messages` — accept a short text payload from a paired
+/// device. The body is parsed by hand so the 32 KiB limit answers with the
+/// protocol's `413 {"error":"bad_request","message":"message too long"}`
+/// instead of a generic extractor rejection. Contents are never logged.
+async fn post_message(
+    State(core): State<Arc<Core>>,
+    Extension(device): Extension<AuthedDevice>,
+    body: Bytes,
+) -> Response {
+    if body.len() > MAX_MESSAGE_BODY_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "bad_request",
+            Some("message too long"),
+        );
+    }
+    let Ok(req) = serde_json::from_slice::<SendMessageRequest>(&body) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            Some("expected {\"text\": \"...\"}"),
+        );
+    };
+    if req.text.len() > crate::messages::MAX_MESSAGE_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "bad_request",
+            Some("message too long"),
+        );
+    }
+    core.receive_message(device.device_name.clone(), req.text);
+    Json(OkResponse { ok: true }).into_response()
 }
 
 // ---------------------------------------------------------------------------

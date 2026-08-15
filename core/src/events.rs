@@ -35,6 +35,15 @@ pub enum CoreEvent {
         size_bytes: u64,
         auto: bool,
     },
+    /// An ephemeral text message arrived from a paired device (§11.2).
+    /// In-memory only — never persisted, never written to history.
+    #[serde(rename_all = "camelCase")]
+    MessageReceived {
+        message_id: Uuid,
+        text: String,
+        sender_name: String,
+        received_at_ms: i64,
+    },
     #[serde(rename_all = "camelCase")]
     ServerStarted { port: u16 },
 }

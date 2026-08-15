@@ -834,6 +834,35 @@ select {
   margin-top: 4px;
 }
 
+/* Foot of the drop zone: "Send text" + the paste hint. */
+
+.hero-foot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  min-height: 16px;
+}
+
+.hero-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(242, 243, 247, 0.55);
+}
+
+.hero-foot-hint {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.paste-hint {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--warn);
+  animation: pc-fade 180ms var(--ease-out);
+}
+
 .send-cols {
   display: flex;
   gap: 16px;
@@ -2185,4 +2214,220 @@ select.input option {
 .drop-overlay-sub {
   font: 400 12px/1 var(--font-mono);
   color: var(--text-faint);
+}
+
+/* ---------- Ephemeral text: incoming cards (PROTOCOL.md §11.3) ---------- */
+
+@keyframes pc-drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.msg-stack {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 85;
+  width: 460px;
+  max-width: calc(100vw - 120px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.msg-card {
+  pointer-events: auto;
+  padding: 14px 16px 15px;
+  border-radius: var(--r-xl);
+  background: linear-gradient(
+    160deg,
+    rgba(30, 32, 46, 0.97),
+    rgba(14, 15, 22, 0.98)
+  );
+  border: 0.5px solid var(--accent-border);
+  box-shadow:
+    inset 0 0 40px oklch(0.72 0.18 265 / 0.1),
+    var(--shadow-modal);
+  animation: pc-drop-in 260ms var(--ease-out);
+}
+
+.msg-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.msg-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--r-xs);
+  background: oklch(0.72 0.18 265 / 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-pale);
+}
+
+.msg-from {
+  font: 600 13px/1.2 var(--font-ui);
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-head-spacer {
+  flex: 1;
+}
+
+.msg-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 2px;
+}
+
+.msg-close {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.msg-text {
+  margin-top: 11px;
+  padding: 11px 12px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.28);
+  border: var(--hairline);
+  font: 400 12.5px/1.55 var(--font-mono);
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 168px;
+  overflow-y: auto;
+  user-select: text;
+  cursor: text;
+}
+
+/* ---------- Ephemeral text: composer ---------- */
+
+.composer-input {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  min-height: 132px;
+  max-height: 300px;
+  resize: vertical;
+  padding: 12px 13px;
+  border-radius: var(--r-sm);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text-primary);
+  outline: none;
+  font: 400 13px/1.55 var(--font-mono);
+  user-select: text;
+  transition:
+    border-color var(--t-fast),
+    box-shadow var(--t-fast);
+}
+
+.composer-input::placeholder {
+  color: var(--text-ghost);
+}
+
+.composer-input:focus {
+  border-color: var(--accent-border-hot);
+  box-shadow: 0 0 0 3px oklch(0.72 0.18 265 / 0.14);
+}
+
+.composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.composer-foot-spacer {
+  flex: 1;
+}
+
+.composer-count {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.composer-count.over {
+  color: var(--danger-strong);
+}
+
+.composer-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font: 400 10.5px/1.5 var(--font-mono);
+  color: var(--text-ghost);
+}
+
+.composer-hint kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  margin: 0 1px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  border: var(--hairline-strong);
+  font: inherit;
+  color: var(--text-faint);
+}
+
+/* ---------- Bulk action bars (PROTOCOL.md §12) ---------- */
+
+.bulk-bar {
+  margin-top: 24px;
+  padding: 12px 14px 12px 18px;
+  border-radius: var(--r-lg);
+  background: var(--glass-3);
+  border: var(--hairline-strong);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  animation: pc-fade 200ms var(--ease-out);
+}
+
+.bulk-count {
+  font: 500 12px/1 var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.bulk-spacer {
+  flex: 1;
+}
+
+.bulk-bar + .detect-banner {
+  margin-top: 10px;
+}
+
+.confirm-body {
+  margin-top: 14px;
+  font: 400 13px/1.6 var(--font-ui);
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
 }

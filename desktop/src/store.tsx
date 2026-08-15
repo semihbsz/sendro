@@ -14,10 +14,12 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import {
   isTerminal,
+  MAX_MESSAGE_CARDS,
   type CoreEvent,
   type Detection,
   type HistoryEntry,
   type HostInfo,
+  type IncomingMessage,
   type PairingSession,
   type Settings,
   type TransferSummary,
@@ -63,6 +65,13 @@ export interface AppState {
   speedSamples: Record<string, number[]>;
   /** Device pinned in the top-bar chip; falls back to first online. */
   chipDeviceId: string | null;
+  /**
+   * Ephemeral text received from paired devices (PROTOCOL.md §11), newest
+   * first. Lives in memory only — never persisted, never in history.
+   */
+  messages: IncomingMessage[];
+  /** Text waiting in the composer, or null when it is closed. */
+  composerText: string | null;
 }
 
 const initialState: AppState = {
@@ -81,6 +90,8 @@ const initialState: AppState = {
   pendingPaths: null,
   speedSamples: {},
   chipDeviceId: null,
+  messages: [],
+  composerText: null,
 };
 
 export type Action =
@@ -105,6 +116,10 @@ export type Action =
   | { type: "set-watch-folders"; folders: WatchFolderConfig[] }
   | { type: "remove-detection"; detectionId: string }
   | { type: "set-chip-device"; deviceId: string | null }
+  | { type: "set-messages"; messages: IncomingMessage[] }
+  | { type: "dismiss-message"; messageId: string }
+  | { type: "open-composer"; text: string }
+  | { type: "close-composer" }
   | { type: "dismiss-pairing" };
 
 function upsertTransfer(
@@ -181,6 +196,23 @@ function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
       };
       return { ...state, detections: [detection, ...state.detections] };
     }
+    case "messageReceived": {
+      // Ephemeral by contract: held in React state only, never written to
+      // history and never re-fetched from disk (there is no disk copy).
+      if (state.messages.some((m) => m.messageId === ev.messageId)) {
+        return state;
+      }
+      const message: IncomingMessage = {
+        messageId: ev.messageId,
+        text: ev.text,
+        senderName: ev.senderName,
+        receivedAtMs: ev.receivedAtMs,
+      };
+      return {
+        ...state,
+        messages: [message, ...state.messages].slice(0, MAX_MESSAGE_CARDS),
+      };
+    }
     case "serverStarted":
       return state.info
         ? { ...state, info: { ...state.info, apiPort: ev.port } }
@@ -230,6 +262,19 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case "set-chip-device":
       return { ...state, chipDeviceId: action.deviceId };
+    case "set-messages":
+      return { ...state, messages: action.messages };
+    case "dismiss-message":
+      return {
+        ...state,
+        messages: state.messages.filter(
+          (m) => m.messageId !== action.messageId,
+        ),
+      };
+    case "open-composer":
+      return { ...state, composerText: action.text };
+    case "close-composer":
+      return { ...state, composerText: null };
     case "dismiss-pairing":
       return { ...state, pairing: null };
   }
@@ -247,16 +292,18 @@ export function useAppDispatch(): Dispatch<Action> {
 }
 
 async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
-  const [info, settings, devices, queue, history, folders] = await Promise.all(
-    [
+  const [info, settings, devices, queue, history, folders, messages] =
+    await Promise.all([
       api.getInfo(),
       api.getSettings(),
       api.trustedDevices(),
       api.getQueue(),
       api.getHistory(),
       api.watchFolders(),
-    ],
-  );
+      // Messages that arrived before the webview subscribed (e.g. after a
+      // reload). Core keeps them in RAM; oldest first → newest first here.
+      api.incomingMessages(),
+    ]);
   dispatch({
     type: "snapshots",
     info,
@@ -266,6 +313,7 @@ async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
     history,
     watchFolders: folders,
   });
+  dispatch({ type: "set-messages", messages: messages.slice().reverse() });
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {

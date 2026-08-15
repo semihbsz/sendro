@@ -90,10 +90,51 @@ struct TransferOffer: Codable, Hashable, Identifiable {
     }
 }
 
+// MARK: - §11 Text messages (ephemeral)
+
+/// A short text payload from a paired host (PROTOCOL.md §11).
+///
+/// Deliberately `Decodable` only — there is no code path that can encode a
+/// message, which makes "never written to disk" a compile-time property
+/// rather than a convention.
+struct Message: Decodable, Identifiable, Equatable {
+    let messageId: String
+    let text: String
+    let sentAtMs: Int64
+    let senderName: String
+
+    var id: String { messageId }
+}
+
+/// §11.2 body for `POST /api/v1/messages`.
+struct SendMessageRequest: Encodable {
+    let text: String
+}
+
+/// §11 hard limit: UTF-8 bytes, not characters.
+let sendroMessageByteLimit = 32 * 1024
+
 // MARK: - §6.2 Outbox
 
-struct OutboxResponse: Codable {
+/// Long-poll response. `messages` is absent (not just empty) when the host
+/// has nothing pending, so it must be decoded with `decodeIfPresent`.
+///
+/// `Decodable` only, for the same reason as `Message`.
+struct OutboxResponse: Decodable {
     let offers: [TransferOffer]
+    let messages: [Message]?
+
+    enum CodingKeys: String, CodingKey {
+        case offers, messages
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Tolerate an omitted "offers" too — an older/newer host that only
+        // has messages pending must not fail the whole poll.
+        self.offers = try container.decodeIfPresent([TransferOffer].self, forKey: .offers) ?? []
+        self.messages = try container.decodeIfPresent([Message].self, forKey: .messages)
+    }
 }
 
 // MARK: - §6.3 Accept / reject, generic ok

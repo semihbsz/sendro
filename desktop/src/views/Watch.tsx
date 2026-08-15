@@ -1,14 +1,19 @@
+import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
 import { baseName, formatBytes } from "../format";
 import { IconFile, IconTrash, IconWatch } from "../icons";
 import { EmptyState, Toggle } from "../components/common";
+import { Modal } from "../components/Modal";
+import { mapLimited } from "../bulk";
 import type { WatchFolderConfig } from "../types";
 
 export function Watch() {
   const { watchFolders, detections, devices } = useAppState();
   const dispatch = useAppDispatch();
+  const [confirmIgnoreAll, setConfirmIgnoreAll] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const refresh = async () => {
     const folders = await api.watchFolders();
@@ -66,6 +71,34 @@ export function Watch() {
     }
   };
 
+  /**
+   * Bulk resolve every currently listed detection. There is no batch
+   * endpoint (PROTOCOL.md §12) — it is a bounded-concurrency loop over the
+   * single-item call, and one failure never aborts the rest.
+   */
+  const resolveAll = async (send: boolean) => {
+    const ids = detections.map((d) => d.detectionId);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    // Clear the feed up front so the UI answers instantly.
+    ids.forEach((detectionId) =>
+      dispatch({ type: "remove-detection", detectionId }),
+    );
+    try {
+      const failures = await mapLimited(ids, 4, (id) =>
+        api.resolveDetectedFile(id, send),
+      );
+      if (failures.length > 0) {
+        console.error(
+          `${failures.length} of ${ids.length} detections failed to resolve`,
+          failures,
+        );
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   return (
     <div className="page" key="watch">
       <div className="page-head">
@@ -79,6 +112,29 @@ export function Watch() {
           Add folder
         </button>
       </div>
+
+      {detections.length > 1 ? (
+        <div className="bulk-bar">
+          <span className="bulk-count">
+            {detections.length} files waiting on you
+          </span>
+          <span className="bulk-spacer" />
+          <button
+            className="btn-solid btn-sm"
+            disabled={bulkBusy}
+            onClick={() => void resolveAll(true)}
+          >
+            Send all ({detections.length})
+          </button>
+          <button
+            className="btn-glass btn-sm"
+            disabled={bulkBusy}
+            onClick={() => setConfirmIgnoreAll(true)}
+          >
+            Ignore all
+          </button>
+        </div>
+      ) : null}
 
       {detections.map((d) => (
         <div className="detect-banner" key={d.detectionId}>
@@ -189,6 +245,31 @@ export function Watch() {
           ))}
         </div>
       )}
+
+      {confirmIgnoreAll ? (
+        <Modal
+          title="Ignore all detections?"
+          onClose={() => setConfirmIgnoreAll(false)}
+          cancelLabel="Keep them"
+        >
+          <div className="confirm-body">
+            {detections.length} detected file
+            {detections.length === 1 ? "" : "s"} will be dropped from this
+            feed. The files stay on disk — they just won't be offered.
+          </div>
+          <div className="confirm-actions">
+            <button
+              className="btn-cancel"
+              onClick={() => {
+                setConfirmIgnoreAll(false);
+                void resolveAll(false);
+              }}
+            >
+              Ignore all
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }

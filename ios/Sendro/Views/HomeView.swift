@@ -20,9 +20,10 @@ struct HomeView: View {
 
     let openDevices: () -> Void
     let openSettings: () -> Void
-    let openSend: () -> Void
     let openFlight: (FlightRef) -> Void
     let goLibrary: () -> Void
+
+    @State private var confirmDeclineAll = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,9 +46,6 @@ struct HomeView: View {
                             .padding(.top, 30)
                     }
 
-                    sendRow
-                        .padding(.top, 26)
-
                     if !engine.active.isEmpty {
                         activeSection
                             .padding(.top, 26)
@@ -61,6 +59,14 @@ struct HomeView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.hidden)
+        }
+        .confirmationDialog("Decline every waiting file?",
+                            isPresented: $confirmDeclineAll,
+                            titleVisibility: .visible) {
+            Button("Decline All", role: .destructive) {
+                engine.declineAll()
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -162,14 +168,47 @@ struct HomeView: View {
             SectionTag(text: "Incoming", color: Theme.irisSoft)
                 .padding(.leading, 2)
 
+            if engine.incomingOffers.count > 1 {
+                bulkBar
+            }
+
             ForEach(engine.incomingOffers) { incoming in
                 offerCard(incoming)
             }
         }
     }
 
+    /// §12 — bulk accept over the existing per-transfer accept path, with
+    /// the engine capping concurrency. Per-card actions are untouched.
+    private var bulkBar: some View {
+        let busy = engine.incomingOffers.contains { $0.isAccepting }
+        return HStack(spacing: 10) {
+            Button {
+                engine.acceptAll()
+            } label: {
+                AccentPillLabel(title: busy
+                                ? "Accepting…"
+                                : "Accept all (\(engine.incomingOffers.count))",
+                                height: 44)
+            }
+            .buttonStyle(PressableButtonStyle())
+            .disabled(busy)
+            .opacity(busy ? 0.6 : 1)
+
+            Button {
+                confirmDeclineAll = true
+            } label: {
+                GhostPillLabel(title: "Decline all", height: 44)
+            }
+            .buttonStyle(PressableButtonStyle())
+            .frame(maxWidth: 128)
+            .disabled(busy)
+            .opacity(busy ? 0.6 : 1)
+        }
+    }
+
     private func offerCard(_ incoming: IncomingOffer) -> some View {
-        VStack(spacing: 20) {
+        VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
                 FileBadge(fileName: incoming.offer.fileName, side: 52, cornerRadius: 16)
                 VStack(alignment: .leading, spacing: 4) {
@@ -186,26 +225,43 @@ struct HomeView: View {
                 Spacer(minLength: 0)
             }
 
+            if let error = incoming.errorMessage {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Theme.danger)
+                    Text(error)
+                        .font(Theme.sans(12.5))
+                        .foregroundColor(Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack(spacing: 10) {
                 Button {
                     let ref = FlightRef(offer: incoming.offer, hostId: incoming.hostId)
                     engine.accept(incoming)
                     openFlight(ref)
                 } label: {
-                    AccentPillLabel(title: "Accept")
+                    AccentPillLabel(title: incoming.isAccepting ? "Accepting…" : "Accept")
                 }
                 .buttonStyle(PressableButtonStyle())
+                .disabled(incoming.isAccepting)
 
                 Button {
                     engine.reject(incoming)
                 } label: {
                     GhostPillLabel(title: "Decline")
-                        .frame(width: 104)
                 }
                 .buttonStyle(PressableButtonStyle())
+                .frame(maxWidth: 112)
+                .disabled(incoming.isAccepting)
             }
+            .opacity(incoming.isAccepting ? 0.6 : 1)
         }
         .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard(cornerRadius: 26)
         .transition(.scale(scale: 0.92).combined(with: .opacity))
     }
@@ -249,51 +305,6 @@ struct HomeView: View {
             return "\(host.name) is online. Anything you send lands here at full size, verified byte for byte."
         }
         return "\(host.name) looks offline right now. Open Sendro on your PC on this Wi-Fi and it will reconnect by itself."
-    }
-
-    // MARK: Send to PC
-
-    /// Entry point for the reverse direction (§7 upload). Enabled only when
-    /// a paired PC is online; otherwise shows why it's disabled.
-    private var sendRow: some View {
-        let online = engine.hostOnline.values.contains(true)
-        return Button(action: openSend) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(online ? Theme.iris.opacity(0.16) : Color.white.opacity(0.05))
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(online ? Theme.irisSoft : Theme.textBase.opacity(0.35))
-                }
-                .frame(width: 38, height: 38)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Send to PC")
-                        .font(Theme.sans(15, .semibold))
-                        .foregroundColor(online ? Theme.textPrimary : Theme.textBase.opacity(0.5))
-                    Text(online
-                         ? "Photos, videos or files — original bytes, verified."
-                         : "No PC online — open Sendro on your computer.")
-                        .font(Theme.mono(10.5))
-                        .foregroundColor(Theme.textTertiary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.textBase.opacity(online ? 0.5 : 0.25))
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .glassRow(cornerRadius: 18,
-                      fillOpacity: online ? 0.06 : 0.035,
-                      borderOpacity: online ? 0.1 : 0.06)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressableButtonStyle())
-        .disabled(!online)
     }
 
     // MARK: Active transfers

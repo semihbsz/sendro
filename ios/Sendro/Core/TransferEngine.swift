@@ -63,6 +63,11 @@ struct IncomingOffer: Identifiable {
     let offer: TransferOffer
     let hostId: String
     let receivedAt: Date
+    /// True while a bulk "Accept all" call for this offer is in flight.
+    var isAccepting: Bool = false
+    /// Set when a bulk accept failed for this one item (§12: a partial
+    /// failure leaves the offer pending with its error surfaced).
+    var errorMessage: String? = nil
 
     var id: String { offer.transferId }
 }
@@ -85,11 +90,17 @@ final class TransferEngine: ObservableObject {
     /// 200 MB safety margin on top of the file size for storage preflight.
     static let storageMargin: Int64 = 200 * 1024 * 1024
 
+    /// §12 — "Accept all" issues the per-transfer accept calls with bounded
+    /// concurrency; never more than this many in flight.
+    static let bulkAcceptConcurrency = 4
+
     private let settings: Settings
     private let paired: PairedHostStore
     private let history: HistoryStore
     private let fileStore: FileStore
     private let discovery: DiscoveryService
+    /// In-RAM only (§11). The engine never persists anything it routes here.
+    private let messages: MessageCenter
 
     private var pollTasks: [String: Task<Void, Never>] = [:]
     private var downloads: [String: DownloadTask] = [:]
@@ -102,12 +113,14 @@ final class TransferEngine: ObservableObject {
                      paired: PairedHostStore,
                      history: HistoryStore,
                      fileStore: FileStore,
-                     discovery: DiscoveryService) {
+                     discovery: DiscoveryService,
+                     messages: MessageCenter) {
         self.settings = settings
         self.paired = paired
         self.history = history
         self.fileStore = fileStore
         self.discovery = discovery
+        self.messages = messages
     }
 
     // MARK: Lifecycle
@@ -192,6 +205,109 @@ final class TransferEngine: ObservableObject {
         if let client = client(for: incoming.hostId) {
             let transferId = incoming.offer.transferId
             Task.detached { try? await client.reject(transferId: transferId) }
+        }
+    }
+
+    // MARK: Bulk offer actions (PROTOCOL.md §12)
+
+    /// Accept every pending offer. There is no batch endpoint — this is a
+    /// client-side loop over §6.3 with at most `bulkAcceptConcurrency`
+    /// accepts in flight. A failure affects only its own item: that offer
+    /// stays pending with `errorMessage` set, the rest carry on.
+    func acceptAll() {
+        let batch = incomingOffers.filter { !$0.isAccepting }
+        guard !batch.isEmpty else { return }
+        for offer in batch {
+            updateIncoming(offer.id) { $0.isAccepting = true; $0.errorMessage = nil }
+        }
+        Task { await self.runBulkAccept(batch) }
+    }
+
+    /// Decline every pending offer (each through the normal reject path).
+    func declineAll() {
+        for incoming in incomingOffers where !incoming.isAccepting {
+            reject(incoming)
+        }
+    }
+
+    private func runBulkAccept(_ batch: [IncomingOffer]) async {
+        await withTaskGroup(of: Void.self) { group in
+            var next = 0
+            let prime = min(Self.bulkAcceptConcurrency, batch.count)
+            while next < prime {
+                let incoming = batch[next]
+                group.addTask { await self.bulkAcceptOne(incoming) }
+                next += 1
+            }
+            // Refill as each slot frees up — never more than `prime` running.
+            while await group.next() != nil {
+                guard next < batch.count else { continue }
+                let incoming = batch[next]
+                group.addTask { await self.bulkAcceptOne(incoming) }
+                next += 1
+            }
+        }
+    }
+
+    /// One item of a bulk accept. Unlike `accept(_:)` (per-card action, which
+    /// optimistically moves the offer into the active list so the Flight
+    /// screen can open), this keeps the offer pending until the host has
+    /// actually accepted it, so a failure is visible where the user left it.
+    private func bulkAcceptOne(_ incoming: IncomingOffer) async {
+        let offer = incoming.offer
+        let hostId = incoming.hostId
+        let transferId = offer.transferId
+
+        // Same storage preflight as the single-offer path (§9).
+        if let free = Self.freeDiskSpace(), free < offer.sizeBytes + Self.storageMargin {
+            sendStatus(hostId, transferId,
+                       StatusReport(state: "failed", error: "insufficient_storage"))
+            failBulkItem(transferId,
+                         "Not enough free space — needs \(ByteFormat.string(offer.sizeBytes + Self.storageMargin)) free.")
+            return
+        }
+        guard let client = client(for: hostId) else {
+            failBulkItem(transferId, "That computer is not reachable right now.")
+            return
+        }
+        do {
+            try await client.accept(transferId: transferId)
+        } catch {
+            failBulkItem(transferId, "Couldn't accept: \(error.localizedDescription)")
+            return
+        }
+        guard incomingOffers.contains(where: { $0.id == transferId }) else {
+            // Declined or accepted individually while this call was in flight.
+            return
+        }
+        incomingOffers.removeAll { $0.id == transferId }
+        processedOfferIds.insert(transferId)
+        addRecord(offer: offer, hostId: hostId)
+        startDownload(offer: offer, hostId: hostId)
+    }
+
+    private func failBulkItem(_ transferId: String, _ message: String) {
+        updateIncoming(transferId) { $0.isAccepting = false; $0.errorMessage = message }
+    }
+
+    private func updateIncoming(_ id: String, _ mutate: (inout IncomingOffer) -> Void) {
+        guard let idx = incomingOffers.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&incomingOffers[idx])
+    }
+
+    // MARK: Text messages (§11.2, client → host)
+
+    /// Send one ephemeral text message. Returns nil on success, or a
+    /// human-readable error. The text is never stored anywhere.
+    func sendMessage(_ text: String, toHostId hostId: String) async -> String? {
+        guard let client = client(for: hostId) else {
+            return "That computer is not reachable right now."
+        }
+        do {
+            try await client.sendMessage(text: text)
+            return nil
+        } catch {
+            return error.localizedDescription
         }
     }
 
@@ -327,6 +443,11 @@ final class TransferEngine: ObservableObject {
                 backoffSeconds = 0
                 for offer in response.offers {
                     handleOffer(offer, hostId: hostId)
+                }
+                // §11.1 — messages ride the same poll. Straight into RAM,
+                // never touched again by this loop.
+                if let delivered = response.messages, !delivered.isEmpty {
+                    messages.receive(delivered)
                 }
                 resumeInterrupted(hostId: hostId)
             } catch {
