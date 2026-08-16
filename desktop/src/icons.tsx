@@ -146,6 +146,15 @@ export const IconArrowDown = (p: IconProps) => (
   </Svg>
 );
 
+/** Arrow into a tray — the in-app update card (UPDATES.md §3). */
+export const IconDownload = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.5v10" />
+    <path d="m8 10 4 3.5 4-3.5" />
+    <path d="M4.5 16v2.5A2 2 0 0 0 6.5 20.5h11a2 2 0 0 0 2-2V16" />
+  </Svg>
+);
+
 export const IconChevronRight = (p: IconProps) => (
   <Svg {...p} strokeWidth={2.6}>
     <path d="m8 5 8 7-8 7" />

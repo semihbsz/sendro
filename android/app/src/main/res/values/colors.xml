@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Only the handful of colours the platform (not Compose) needs: the window
+  background and the adaptive-icon tile. The full palette lives in
+  ui/theme/Theme.kt — these must stay in sync with it by hand.
+-->
+<resources>
+    <!-- Theme.bg -->
+    <color name="sendro_canvas">#07080B</color>
+    <!-- App icon tile gradient ends (scripts/generate_icons.py) -->
+    <color name="sendro_tile_top">#151A21</color>
+    <color name="sendro_tile_bottom">#0A0C10</color>
+    <color name="sendro_teal">#37E6C4</color>
+</resources>

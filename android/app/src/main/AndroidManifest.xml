@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      LAN only. The single outbound-internet use in the whole app is the
+      update check (docs/UPDATES.md §4); everything else talks to a private
+      address on the local Wi-Fi.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- MulticastLock while browsing mDNS: some devices drop multicast to
+         save power and _sendro._tcp is never seen without it. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Foreground service keeps a transfer alive when the user leaves the
+         app (the Android analogue of the iOS Live Activity). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Saving originals into the gallery on API 28 and below needs legacy
+         external storage; API 29+ uses MediaStore and needs nothing. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- QR pairing (PROTOCOL.md §13). Optional hardware: a tablet or a TV
+         without a camera still pairs with the 6-digit keypad. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      ONE APK, phone-first, TV-capable.
+
+      Every hardware feature below is `required="false"` on purpose. Android
+      infers implicit `<uses-feature>` requirements from permissions (CAMERA
+      implies android.hardware.camera), and any *required* feature a TV lacks
+      makes the device ineligible — the app then never appears in the Android
+      TV launcher, and the Play/TV filters exclude it. Declaring them
+      explicitly and optionally is the only way to stay installable on both.
+
+      `android.software.leanback` + `android.hardware.touchscreen` as
+      required="false" is the specific pair that makes a phone app TV-visible:
+      leanback says "this can run on a TV", touchscreen says "and it does not
+      need a finger".
+    -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.faketouch"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.screen.portrait"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.wifi"
+        android:required="false" />
+
+    <!-- Self-update: hand the verified APK to the system installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:name=".SendroApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:logo="@mipmap/ic_launcher"
+        android:banner="@drawable/sendro_banner"
+        android:label="@string/app_name"
+        android:enableOnBackInvokedCallback="true"
+        android:supportsRtl="false"
+        android:theme="@style/Theme.Sendro"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:windowSoftInputMode="adjustResize"
+            android:banner="@drawable/sendro_banner"
+            android:icon="@mipmap/ic_launcher"
+            android:screenOrientation="unspecified"
+            android:theme="@style/Theme.Sendro">
+
+            <!--
+              Both launcher categories in ONE filter: a phone launcher matches
+              LAUNCHER, the Android TV launcher matches LEANBACK_LAUNCHER, and
+              the same activity answers both. Splitting them into two filters
+              would also work but would let a launcher show two entries.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <!-- PROTOCOL.md §13: scanning the PC's QR with ANY camera app
+                 opens Sendro straight into the pairing confirmation. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sendro" android:host="pair" />
+            </intent-filter>
+
+            <!-- "Share → Sendro" from any app. Files are staged into the Send
+                 queue and NEVER auto-sent. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".core.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Serves received files to other apps (ACTION_VIEW / ACTION_SEND)
+             and the downloaded APK to the package installer. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+    <!-- targetSdk 30+ package visibility: we open received files with the
+         user's viewer of choice and hand APKs to the installer. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.INSTALL_PACKAGE" />
+        </intent>
+        <!-- DeviceProfile probes for a SAF picker before offering "Files";
+             without this the probe always answers "no" on API 30+. -->
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <!-- The updater walks these looking for a reachable "install unknown
+             apps" screen; several TV firmwares implement only some of them. -->
+        <intent>
+            <action android:name="android.settings.MANAGE_UNKNOWN_APP_SOURCES" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.SECURITY_SETTINGS" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.SETTINGS" />
+        </intent>
+    </queries>
+</manifest>

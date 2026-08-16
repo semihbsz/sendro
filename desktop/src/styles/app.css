@@ -1648,6 +1648,13 @@ select {
   overflow: hidden;
 }
 
+/* The panel itself is unpadded on purpose (rows own their inset so their
+   hairlines run full-bleed). Anything dropped straight into a panel that is
+   not a row still has to line up with the rows' 20px left edge. */
+.settings-panel > .error-note {
+  margin: 14px 20px 0;
+}
+
 .settings-row {
   display: flex;
   align-items: center;
@@ -2623,11 +2630,16 @@ select.input option {
   margin: 0;
 }
 
+/* The Connection panel does not use `.settings-row`, so it has to bring the
+   panel's own inset (16px 20px) with it — otherwise its heading and hint
+   render flush against the card's top-left border. Keep the hairline
+   full-bleed like `.settings-row + .settings-row` by padding *inside* the
+   head rather than padding the panel. */
 .conn-head {
   display: flex;
   align-items: flex-end;
   gap: 16px;
-  padding-bottom: 14px;
+  padding: 16px 20px 14px;
   border-bottom: var(--hairline);
 }
 
@@ -2637,7 +2649,7 @@ select.input option {
 }
 
 .conn-empty {
-  padding: 16px 2px 2px;
+  padding: 16px 20px 18px;
   font: 400 12.5px/1.5 var(--font-ui);
   color: var(--text-faint);
 }
@@ -2646,7 +2658,7 @@ select.input option {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 12px;
+  padding: 12px 20px 16px;
 }
 
 .conn-row {
@@ -3173,4 +3185,189 @@ select.input option {
   color: var(--text-ghost);
   direction: rtl;
   text-align: left;
+}
+
+/* ---------- In-app updates (UPDATES.md §3) ---------- */
+
+/* Anchored bottom-right so it never fights the incoming-text stack, which
+   drops in at the top centre. */
+.update-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 22px;
+  z-index: 84;
+  width: 392px;
+  max-width: calc(100vw - 140px);
+  pointer-events: none;
+}
+
+.update-card {
+  pointer-events: auto;
+  padding: 15px 16px 14px;
+  border-radius: var(--r-xl);
+  background: linear-gradient(
+    160deg,
+    rgba(30, 32, 46, 0.97),
+    rgba(14, 15, 22, 0.98)
+  );
+  border: 0.5px solid var(--accent-border);
+  box-shadow:
+    inset 0 0 40px oklch(0.72 0.18 265 / 0.1),
+    var(--shadow-modal);
+  animation: pc-drop-in 260ms var(--ease-out);
+}
+
+.update-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-icon {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: var(--r-xs);
+  background: oklch(0.72 0.18 265 / 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-pale);
+}
+
+.update-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-title {
+  font: 600 13.5px/1.3 var(--font-ui);
+  color: var(--text-soft);
+}
+
+.update-sub {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.update-close {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.update-body {
+  margin-top: 11px;
+}
+
+.update-notes {
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.28);
+  border: var(--hairline);
+  font: 400 12.5px/1.55 var(--font-ui);
+  color: var(--text-secondary);
+  max-height: 132px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  user-select: text;
+  text-wrap: pretty;
+}
+
+.update-error {
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--danger-bg);
+  border: 0.5px solid rgba(255, 90, 90, 0.3);
+  font: 400 12.5px/1.5 var(--font-ui);
+  color: var(--danger-strong);
+  text-wrap: pretty;
+}
+
+.update-warn {
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--warn-dim);
+  border: 0.5px solid rgba(232, 194, 104, 0.28);
+  font: 400 12.5px/1.5 var(--font-ui);
+  color: var(--warn);
+  text-wrap: pretty;
+}
+
+.update-blocked {
+  margin-top: 11px;
+  font: 400 12px/1.5 var(--font-ui);
+  color: var(--warn);
+}
+
+.update-progress {
+  margin-top: 13px;
+}
+
+.update-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.update-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+  transition: width 180ms var(--ease-out);
+}
+
+/* No Content-Length: keep it honestly ambiguous instead of faking a number. */
+.update-bar-fill.indeterminate {
+  width: 38%;
+  animation: update-sweep 1.25s var(--ease-out) infinite;
+}
+
+@keyframes update-sweep {
+  0% {
+    transform: translateX(-105%);
+  }
+  100% {
+    transform: translateX(275%);
+  }
+}
+
+.update-progress-meta {
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.update-actions {
+  margin-top: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-actions-spacer {
+  flex: 1;
+}
+
+.update-hint {
+  font: 400 12px/1.4 var(--font-ui);
+  color: var(--text-tertiary);
+}
+
+/* The Settings "Updates" section body — same 20px inset as the rows. */
+.update-status {
+  font: 400 11.5px/1.5 var(--font-ui);
+  color: var(--text-tertiary);
+  margin-top: 3px;
+}
+
+.update-status.warn {
+  color: var(--warn);
+}
+
+.update-status.bad {
+  color: var(--danger-strong);
 }

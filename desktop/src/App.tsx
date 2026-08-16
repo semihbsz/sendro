@@ -13,6 +13,7 @@ import { MessageCards } from "./components/MessageCards";
 import { TextComposer } from "./components/TextComposer";
 import { FilePreview } from "./components/FilePreview";
 import { Notifications } from "./components/Notifications";
+import { UpdateCard } from "./components/UpdateCard";
 import { Send } from "./views/Send";
 import { Flow } from "./views/Flow";
 import { Watch } from "./views/Watch";
@@ -132,6 +133,7 @@ export default function App() {
         </div>
       ) : null}
       <MessageCards />
+      <UpdateCard />
       <PairingModal />
       <DevicePicker />
       <TextComposer />

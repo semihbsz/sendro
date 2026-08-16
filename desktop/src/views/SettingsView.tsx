@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
@@ -8,6 +7,7 @@ import { IconPhone, IconWifi } from "../icons";
 import { Toggle } from "../components/common";
 import { ConnectionCard } from "../components/ConnectionCard";
 import { usePrefs } from "../prefs";
+import { useUpdates } from "../updates";
 import {
   ensurePermission,
   permissionGranted,
@@ -192,24 +192,117 @@ function NotificationsSection() {
   );
 }
 
+/**
+ * In-app updates (UPDATES.md §3). The card itself floats over the app; this
+ * is the always-there half: the auto-check switch, the manual button, and the
+ * version this build actually is.
+ */
+function UpdatesSection() {
+  const u = useUpdates();
+  const unsupported = u.phase === "unsupported";
+
+  const status = (() => {
+    if (unsupported) {
+      return {
+        tone: "warn" as const,
+        text:
+          u.unsupportedReason ??
+          "Updates are not configured in this build — install new versions from the release page.",
+      };
+    }
+    if (u.phase === "checking") return { tone: null, text: "Checking…" };
+    if (u.error) {
+      return { tone: "bad" as const, text: u.error.message };
+    }
+    if (u.phase === "downloading" || u.phase === "installing") {
+      return { tone: null, text: "Downloading the update…" };
+    }
+    if (u.release) {
+      return {
+        tone: "warn" as const,
+        text: `Sendro ${u.release.version} is ready to install.`,
+      };
+    }
+    if (u.lastCheckedMs !== null) {
+      return {
+        tone: null,
+        text: `You're on the latest version — checked ${formatRelative(u.lastCheckedMs)}.`,
+      };
+    }
+    return {
+      tone: null,
+      text: u.autoCheck
+        ? "Sendro checks shortly after launch and every 6 hours."
+        : "Automatic checks are off — use “Check now”.",
+    };
+  })();
+
+  return (
+    <div className="settings-section">
+      <span className="strip-label">Updates</span>
+      <div className="settings-panel">
+        <div className="settings-row">
+          <div>
+            <div className="field-label">Check for updates automatically</div>
+            <div className="field-hint">
+              A plain HTTPS request for one small file — no identifiers, no
+              telemetry. Nothing is ever downloaded without your click.
+            </div>
+          </div>
+          <Toggle
+            on={u.autoCheck}
+            disabled={unsupported}
+            label="Check for updates automatically"
+            onChange={u.setAutoCheck}
+          />
+        </div>
+
+        <div className="settings-row">
+          <div>
+            <div className="field-label">This version</div>
+            <div className="field-hint mono">
+              v{u.currentVersion || "—"}
+              {u.release ? `  →  v${u.release.version} available` : ""}
+            </div>
+            <div className={`update-status${status.tone ? ` ${status.tone}` : ""}`}>
+              {status.text}
+            </div>
+          </div>
+          <div className="settings-control">
+            {unsupported || u.error ? (
+              <button
+                className="btn-glass btn-sm"
+                onClick={() => void u.openReleasePage()}
+              >
+                Open release page
+              </button>
+            ) : null}
+            <button
+              className="btn-glass btn-sm"
+              disabled={unsupported || u.phase === "checking"}
+              onClick={() => void u.checkNow()}
+            >
+              {u.phase === "checking" ? "Checking…" : "Check now"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsView() {
   const { settings, info } = useAppState();
   const dispatch = useAppDispatch();
+  const { currentVersion: version } = useUpdates();
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
-
-  useEffect(() => {
-    getVersion()
-      .then(setVersion)
-      .catch(() => setVersion(""));
-  }, []);
 
   if (!draft) {
     return (
@@ -413,6 +506,8 @@ export function SettingsView() {
           </div>
         </div>
       </div>
+
+      <UpdatesSection />
 
       <div className="settings-section">
         <span className="strip-label">About</span>

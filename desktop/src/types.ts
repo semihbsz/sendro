@@ -87,6 +87,20 @@ export interface Settings {
 }
 
 /**
+ * Whether this build can update itself (UPDATES.md §3).
+ *
+ * `configured` is false whenever the updater signing key is still the
+ * placeholder or the endpoint is missing — the Rust side then never registers
+ * `tauri-plugin-updater` at all, so the UI must not call it. See
+ * `src-tauri/src/updates.rs`.
+ */
+export interface UpdaterStatus {
+  configured: boolean;
+  reason: string | null;
+  endpoints: string[];
+}
+
+/**
  * An ephemeral text message received from a paired device (PROTOCOL.md §11).
  * RAM only on both sides — never persisted, never shown in history.
  */

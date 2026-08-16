@@ -67,7 +67,11 @@ sendro/
 ├── .github/workflows/    ios-build.yml  — builds an unsigned IPA on a macOS
 │                                          runner (no Mac needed at home).
 │                         windows-build.yml — builds the Tauri installer.
+│                         release.yml    — one tag, both platforms: signed
+│                                          bundles + update manifests.
 ├── branding/             Icon system and brand assets.
+├── release/              release.json — the one place a version number and
+│                         its release notes are written by hand.
 ├── docs/                 You are here. PROTOCOL.md is the wire-format
 │                         source of truth; CORE_API.md pins the Rust seam.
 └── scripts/              Helper scripts.
@@ -79,7 +83,7 @@ sendro/
 2. **iPhone side** — build the IPA in the cloud and sideload it with no Mac and a free Apple ID: [docs/IOS_BUILD_AND_SIDELOAD.md](docs/IOS_BUILD_AND_SIDELOAD.md)
 3. Pair (6-digit code), send a file, watch it verify.
 
-When something doesn't connect: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). For hacking on Sendro: [docs/DEV_WORKFLOW.md](docs/DEV_WORKFLOW.md). For the honest security story: [docs/SECURITY.md](docs/SECURITY.md). To validate a build end-to-end: [docs/ACCEPTANCE_TESTS.md](docs/ACCEPTANCE_TESTS.md).
+When something doesn't connect: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). For hacking on Sendro: [docs/DEV_WORKFLOW.md](docs/DEV_WORKFLOW.md). To cut a release (and to set up update signing the first time): [docs/RELEASING.md](docs/RELEASING.md). For the honest security story: [docs/SECURITY.md](docs/SECURITY.md). To validate a build end-to-end: [docs/ACCEPTANCE_TESTS.md](docs/ACCEPTANCE_TESTS.md).
 
 ## Honest limitations
 

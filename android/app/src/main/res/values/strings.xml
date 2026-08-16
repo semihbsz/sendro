@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The UI is written in English, in Kotlin, next to the composables that use it
+  (same as the iOS app, which keeps its copy inline in SwiftUI). Only the few
+  strings the OS itself renders live here.
+-->
+<resources>
+    <string name="app_name">Sendro</string>
+    <string name="notification_channel_transfers">Transfers</string>
+    <string name="notification_channel_offers">Incoming files</string>
+    <string name="notification_channel_messages">Text messages</string>
+    <string name="notification_channel_progress">Active transfer</string>
+</resources>

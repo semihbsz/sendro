@@ -1,0 +1,91 @@
+name: Android Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-build.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-build.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build debug APK, lint, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Provisions Gradle on PATH and handles the build cache. This matters
+      # here: android/gradle/wrapper/gradle-wrapper.jar is a binary and is NOT
+      # committed, so `./gradlew` falls back to the Gradle this action
+      # installs (see android/gradlew's header comment).
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # Materialise the wrapper jar so every later step (and anyone who checks
+      # out this commit) gets a real wrapper rather than the PATH fallback.
+      - name: Ensure the Gradle wrapper jar exists
+        working-directory: android
+        run: |
+          set -euo pipefail
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "gradle-wrapper.jar missing — generating it with the provisioned Gradle."
+            gradle wrapper --gradle-version 8.11.1
+          fi
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Unit tests
+        working-directory: android
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Lint
+        working-directory: android
+        run: ./gradlew --no-daemon lintDebug
+
+      - name: Assemble debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sendro-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sendro-android-reports
+          path: |
+            android/app/build/reports/tests/**
+            android/app/build/reports/lint-results-*.html
+            android/app/build/reports/lint-results-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Debug-build notice
+        run: |
+          echo "=============================================================="
+          echo " This APK is DEBUG-signed and its applicationId ends in"
+          echo " .debug, so it installs side by side with a release build and"
+          echo " can never upgrade one (docs/UPDATES.md §4)."
+          echo " Release APKs come from .github/workflows/release.yml, signed"
+          echo " with the keystore in GitHub Secrets."
+          echo "=============================================================="

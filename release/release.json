@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "pubDate": "2026-08-16T00:00:00Z",
+  "notes": "First public Sendro release: LAN transfers verified byte-for-byte, QR pairing, Sendro Link, watch folders, and in-app updates.",
+  "notesTr": "İlk genel Sendro sürümü: bayt bayt doğrulanan yerel ağ transferleri, QR ile eşleştirme, Sendro Link, klasör izleme ve uygulama içi güncelleme.",
+  "minSupported": "1.0.0",
+  "mandatory": false
+}

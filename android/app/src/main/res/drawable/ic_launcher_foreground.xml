@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: the Sendro beam, exactly the geometry the icon
+  pipeline draws (scripts/generate_icons.py):
+
+      beam  M 252 708 C 560 708, 452 316, 700 316   stroke 88, round caps
+            gradient #1FB78F -> #37E6C4 -> #6BF2D6 along (300,712)->(756,312)
+      dot   circle r 42 at (806, 316), #6BF2D6
+
+  The whole mark is scaled to 0.62 about the centre so it sits inside the
+  adaptive icon's 72/108 safe circle.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+
+    <group
+        android:pivotX="512"
+        android:pivotY="512"
+        android:scaleX="0.62"
+        android:scaleY="0.62">
+
+        <path
+            android:pathData="M 252,708 C 560,708 452,316 700,316"
+            android:strokeWidth="88"
+            android:strokeLineCap="round">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="300"
+                    android:startY="712"
+                    android:endX="756"
+                    android:endY="312">
+                    <item android:offset="0" android:color="#FF1FB78F" />
+                    <item android:offset="0.62" android:color="#FF37E6C4" />
+                    <item android:offset="1" android:color="#FF6BF2D6" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <path
+            android:pathData="M 764,316 a 42,42 0 1,0 84,0 a 42,42 0 1,0 -84,0"
+            android:fillColor="#FF6BF2D6" />
+    </group>
+</vector>

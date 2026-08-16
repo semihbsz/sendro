@@ -1,6 +1,6 @@
 [package]
 name = "sendro-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Core engine for Sendro: private LAN file transfer (Windows PC <-> iPhone)"

@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# Sendro Gradle start-up script for POSIX shells.
+#
+# This is the standard Gradle wrapper launcher with ONE addition, which exists
+# because `gradle/wrapper/gradle-wrapper.jar` is a binary and this repository
+# does not carry it (it cannot be produced without a Gradle installation):
+#
+#   * jar present  -> behave exactly like the stock wrapper.
+#   * jar missing, `gradle` on PATH -> delegate to that Gradle. This is what
+#     happens in CI (gradle/actions/setup-gradle provisions `gradle`), so
+#     `./gradlew assembleRelease` works in .github/workflows/release.yml
+#     without that workflow being changed.
+#   * jar missing and no `gradle` -> fail with an instruction instead of a
+#     confusing ClassNotFoundException.
+#
+# Once anyone runs `gradle wrapper` (or opens the project in Android Studio,
+# which does it for you) the jar appears and the first branch takes over.
+
+set -e
+
+# Resolve the directory this script lives in, following symlinks.
+PRG="$0"
+while [ -h "$PRG" ]; do
+    ls=$(ls -ld "$PRG")
+    link=$(expr "$ls" : '.*-> \(.*\)$')
+    case $link in
+        /*) PRG="$link" ;;
+        *)  PRG=$(dirname "$PRG")/"$link" ;;
+    esac
+done
+APP_HOME=$(cd "$(dirname "$PRG")" > /dev/null && pwd -P)
+
+WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_PROPERTIES="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+
+if [ ! -r "$WRAPPER_PROPERTIES" ]; then
+    echo "ERROR: $WRAPPER_PROPERTIES is missing." >&2
+    exit 1
+fi
+
+# Locate java.
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVACMD="$JAVA_HOME/bin/java"
+elif command -v java > /dev/null 2>&1; then
+    JAVACMD=java
+else
+    echo "ERROR: no Java found. Set JAVA_HOME or put java on PATH (JDK 17)." >&2
+    exit 1
+fi
+
+if [ -r "$WRAPPER_JAR" ]; then
+    exec "$JAVACMD" $JAVA_OPTS $GRADLE_OPTS \
+        "-Dorg.gradle.appname=$(basename "$0")" \
+        -classpath "$WRAPPER_JAR" \
+        org.gradle.wrapper.GradleWrapperMain "$@"
+fi
+
+if command -v gradle > /dev/null 2>&1; then
+    echo "gradle-wrapper.jar is not in the tree; using the Gradle on PATH:" >&2
+    gradle --version | sed -n 's/^Gradle /  gradle /p' >&2
+    echo "  (run 'gradle wrapper' once to materialise the wrapper jar)" >&2
+    exec gradle -p "$APP_HOME" "$@"
+fi
+
+cat >&2 <<'EOF'
+ERROR: gradle/wrapper/gradle-wrapper.jar is missing and no `gradle` is on PATH.
+
+Do one of:
+  * open android/ in Android Studio (it regenerates the wrapper), or
+  * install Gradle 8.11.1 and run:  gradle wrapper --gradle-version 8.11.1
+EOF
+exit 1

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider roots. Every path here maps to a directory the app actually
+  writes to; nothing outside these is ever exposed.
+
+  files-path  ->  Context.getFilesDir()
+  cache-path  ->  Context.getCacheDir()
+  external-files-path -> Context.getExternalFilesDir(null)
+-->
+<paths>
+    <!-- Documents/Sendro equivalent: verified received files kept on-device. -->
+    <files-path
+        name="sendro_received"
+        path="received/" />
+    <!-- .part files while downloading (used by "retry from disk" flows only). -->
+    <files-path
+        name="sendro_incoming"
+        path="incoming/" />
+    <!-- Staged copies of files the user picked / shared into Sendro. -->
+    <cache-path
+        name="sendro_outgoing"
+        path="outgoing/" />
+    <!-- Downloaded APK handed to the system package installer (UPDATES.md §4). -->
+    <files-path
+        name="sendro_updates"
+        path="updates/" />
+</paths>

@@ -9,6 +9,7 @@
 mod commands;
 mod preview;
 mod tray;
+mod updates;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -200,7 +201,24 @@ fn remember_event_paths(app: &AppHandle, event: &CoreEvent) {
 }
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let context = tauri::generate_context!();
+
+    // UPDATES.md §3 — decided *before* the builder runs. `tauri-plugin-updater`
+    // deserializes `plugins.updater` in its own `initialize`, so registering it
+    // against a missing or placeholder config turns "updates are not set up
+    // yet" into "Sendro does not start". See src/updates.rs.
+    let updater = updates::inspect(context.config());
+    if !updater.configured {
+        log::warn!(
+            "in-app updates disabled: {}",
+            updater
+                .reason
+                .as_deref()
+                .unwrap_or("no reason given (this is a bug)")
+        );
+    }
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -208,7 +226,18 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
-        ))
+        ));
+
+    if updater.configured {
+        // The process plugin exists only so the webview can relaunch after an
+        // install; it is pointless without the updater and is gated with it.
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    let app = builder
+        .manage(updater)
         .setup(|app| {
             setup(app)?;
             Ok(())
@@ -262,12 +291,13 @@ pub fn run() {
             commands::remove_link_file,
             commands::network_interfaces,
             commands::show_window,
+            updates::updater_status,
             preview::preview_file,
             preview::read_text_preview,
             preview::open_previewed_file,
             preview::reveal_previewed_file,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Sendro");
 
     app.run(|app_handle, event| {

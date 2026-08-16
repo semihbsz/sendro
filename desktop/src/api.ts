@@ -17,6 +17,7 @@ import type {
   TextPreview,
   TransferSummary,
   TrustedDevice,
+  UpdaterStatus,
   WatchFolderConfig,
 } from "./types";
 
@@ -129,3 +130,12 @@ export const revealPreviewedFile = (path: string) =>
 
 /** Show, restore and focus the main window. */
 export const showWindow = () => invoke<void>("show_window");
+
+/**
+ * Can this build update itself? (UPDATES.md §3.)
+ *
+ * Always answers — the command is registered even when the updater plugin is
+ * not, precisely so "updates are not configured" is a state the UI can render
+ * instead of an unhandled invoke rejection.
+ */
+export const updaterStatus = () => invoke<UpdaterStatus>("updater_status");

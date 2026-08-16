@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The XML theme exists only so the window matches Sendro's canvas before the
+  first Compose frame (no white flash on cold start). Everything visual after
+  that comes from ui/theme/Theme.kt.
+
+  Parent is the platform's own Material theme: compose-material3 ships no XML
+  theme, and sitting on Theme.Material.NoActionBar avoids pulling AppCompat or
+  the Material Components view library in for one style.
+-->
+<resources>
+    <style name="Theme.Sendro" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sendro_canvas</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { AppProvider } from "./store";
+import { UpdatesProvider } from "./updates";
 
 // Bundled fonts — the app must render identically offline (no Google Fonts).
 import "@fontsource/instrument-sans/400.css";
@@ -19,8 +20,12 @@ if (!container) {
   throw new Error("missing #root element");
 }
 
+// UpdatesProvider sits inside AppProvider on purpose: it has to see the
+// transfer queue to know when an install must wait (UPDATES.md §3).
 createRoot(container).render(
   <AppProvider>
-    <App />
+    <UpdatesProvider>
+      <App />
+    </UpdatesProvider>
   </AppProvider>,
 );

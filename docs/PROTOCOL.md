@@ -381,3 +381,63 @@ uploads per session.
 - The session is RAM-only: it never survives an app restart.
 - Starting a link session requires an explicit user action in the PC UI;
   it is never started by a request from the network.
+
+## 15. Receiver host mode (Android TV)
+
+Until now only the Windows PC acted as **host**; phones and the TV were
+clients. That leaves phone → TV impossible, because two clients cannot talk.
+So the Android app can also run the *host* side — a deliberately reduced
+one, since a TV only ever receives.
+
+Nothing new is invented: the TV speaks the same protocol the PC speaks, so
+existing clients need no protocol change.
+
+### 15.1 Which endpoints the receiver host implements
+
+| endpoint | required | note |
+|---|---|---|
+| `GET /api/v1/info` | yes | `platform: "androidtv"` (or `"android"`), same shape as §5 |
+| `POST /api/v1/pair/start`, `/pair/confirm` | yes | §4 verbatim — same HKDF/HMAC, same 120 s expiry, same attempt caps |
+| `GET /api/v1/ping` | yes | §4.3 |
+| `POST /api/v1/upload` | yes | §7 verbatim — this is how a phone or PC pushes a file to the TV |
+| `POST /api/v1/messages` | yes | §11.2 — text/links land on the TV as a card |
+| `GET /api/v1/outbox`, transfer routes | **no** | a receiver never offers files; return `404 not_found` |
+
+mDNS: the receiver advertises `_sendro._tcp` exactly as §2, with `pf` set to
+its platform and `v=1`. Clients must therefore treat a discovered peer's
+`pf` as informational only and decide capability from `/api/v1/info` plus a
+`404` on the outbox — never assume a peer can send.
+
+The default port is the same 48800 with the same fallback scan.
+
+### 15.2 Pairing a phone to the TV (§13 with the TV as host)
+
+The TV renders the §13 `sendro://pair?…` QR on the big screen; the phone
+scans it with its camera and confirms. This is the *only* pleasant pairing
+path on a device with no keyboard, and it is exactly the same optical-channel
+argument as §13: what you can scan, you can see, so you are in the room.
+
+The typed 6-digit code stays available for a sender without a camera (the
+PC): the TV shows the digits, the user types them on the PC.
+
+### 15.3 Sending to the TV from the PC
+
+Two directions are now possible and both are legitimate:
+
+- **PC as host, TV as client** (the original path, already implemented):
+  the PC offers, the TV long-polls, accepts and downloads. Preferred when
+  the PC drives the interaction — the PC's queue and history stay accurate,
+  and resume/Range works.
+- **TV as host, PC as client**: the PC pushes with §7 upload. Simpler, no
+  offer/accept round trip, but no resume.
+
+Clients should prefer the first when the peer exposes an outbox.
+
+### 15.4 Receiver-side obligations
+
+- Verify SHA-256 on every upload before reporting success, exactly as §7.
+- Never re-encode: bytes land on disk unchanged.
+- Uploads are only accepted from paired devices with a valid bearer token.
+- The receiver host is **off by default on phones** (a phone is normally a
+  client) and **on by default on a TV**, with a user-visible toggle either
+  way. Turning it off stops the server and the mDNS advertisement.
