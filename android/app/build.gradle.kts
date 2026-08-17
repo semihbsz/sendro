@@ -1,4 +1,11 @@
+// Everything from java.* is imported, never fully qualified at the use site:
+// inside a Kotlin DSL build script `java` resolves to the JavaPluginExtension,
+// so `java.util.Base64` fails with "Unresolved reference: util". java.io.File
+// is imported for the same reason plus one more — it is NOT one of Gradle's
+// implicit Kotlin DSL imports, so `File(...)` without this line is a gamble.
+import java.io.File
 import java.io.FileInputStream
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -46,7 +53,7 @@ val releaseKeystoreFile: File? = run {
     val base64 = secret("ANDROID_KEYSTORE_BASE64") ?: return@run null
     val decoded = File(layout.buildDirectory.get().asFile, "signing/sendro-release.jks")
     decoded.parentFile?.mkdirs()
-    decoded.writeBytes(java.util.Base64.getMimeDecoder().decode(base64))
+    decoded.writeBytes(Base64.getMimeDecoder().decode(base64))
     decoded
 }
 
@@ -127,7 +134,17 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-        freeCompilerArgs += listOf("-opt-in=kotlin.RequiresOptIn")
+        // Module-wide opt-ins rather than per-call-site @OptIn annotations.
+        // Compose moves APIs between "experimental" and "stable" between
+        // versions, and a missing opt-in is a hard compile error while an
+        // unnecessary one is only a warning — so the whole module opts in once
+        // and no call site has to know which side of the line an API is on.
+        freeCompilerArgs += listOf(
+            "-opt-in=kotlin.RequiresOptIn",
+            "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+            "-opt-in=androidx.compose.ui.ExperimentalComposeUiApi",
+        )
     }
 
     buildFeatures {

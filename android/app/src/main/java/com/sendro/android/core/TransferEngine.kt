@@ -523,7 +523,38 @@ class TransferEngine(
             }
 
             try {
-                val response = client.outboxLongPoll(POLL_WAIT_SECONDS)            } catch (e: CancellationException) {
+                val response = client.outboxLongPoll(POLL_WAIT_SECONDS)
+                if (!stillActive()) return
+                // A 200 — even an empty one — is the strongest possible
+                // liveness signal, so it both clears the backoff and marks the
+                // host online.
+                markOnline(hostId, true)
+                backoff = 0.0
+
+                var senderName = paired.host(hostId)?.name.orEmpty()
+                var freshOffers = 0
+                for (offer in response.offers) {
+                    if (offer.senderName.isNotBlank()) senderName = offer.senderName
+                    if (handleOffer(offer, hostId)) freshOffers++
+                }
+                if (freshOffers > 0) {
+                    notifier.notifyIncomingOffers(freshOffers, senderName.ifBlank { "Your PC" })
+                }
+
+                // §11: straight into the RAM inbox, and a notification that
+                // names the sender and nothing else.
+                if (response.messages.isNotEmpty()) {
+                    messages.receive(response.messages)
+                    val from = response.messages.lastOrNull()?.senderName
+                        ?.takeIf { it.isNotBlank() }
+                        ?: senderName
+                    notifier.notifyMessage(from.ifBlank { "Your PC" })
+                }
+
+                // The host is answering again, so anything parked by a lost
+                // connection can pick up where it stopped.
+                resumeInterrupted(hostId)
+            } catch (e: CancellationException) {
                 throw e
             } catch (e: SendroHttpException) {
                 if (!stillActive()) return
