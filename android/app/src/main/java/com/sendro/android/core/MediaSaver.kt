@@ -518,15 +518,19 @@ class PendingSave internal constructor(
                 SaveResult.Gallery(uri, displayName)
             }
             finalFile != null && partialFile != null -> {
-                if (!partialFile.renameTo(finalFile)) {
+                // Bound to locals: a member `val` does not smart-cast inside a
+                // lambda, which is exactly what the copy fallback below is.
+                val target: File = finalFile
+                val partial: File = partialFile
+                if (!partial.renameTo(target)) {
                     // Same directory, so this should never fail; if it does,
                     // fall back to a copy rather than losing verified bytes.
                     runCatching {
-                        partialFile.copyStreamTo(finalFile)
-                        partialFile.delete()
+                        partial.copyStreamTo(target)
+                        partial.delete()
                     }.getOrElse { return SaveResult.Failed("Could not finish the save.") }
                 }
-                SaveResult.Files(finalFile)
+                SaveResult.Files(target)
             }
             else -> SaveResult.Failed("No destination.")
         }

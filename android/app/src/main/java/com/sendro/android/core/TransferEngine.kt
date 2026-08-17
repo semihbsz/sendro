@@ -870,6 +870,7 @@ class TransferEngine(
 
             is SaveResult.Files -> finishCompleted(
                 offer, hostId, savedTo = "files", localName = result.file.name,
+                mediaUri = null,
             )
         }
     }
