@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,6 +88,7 @@ fun ReceiveScreen(
     onOpenFlight: (String) -> Unit,
     onPreview: (PreviewRequest) -> Unit,
     onGoLibrary: () -> Unit,
+    onOpenReceiverPairing: () -> Unit,
 ) {
     val incoming by app.transferEngine.incoming.collectAsStateWithLifecycle()
     val active by app.transferEngine.active.collectAsStateWithLifecycle()
@@ -92,21 +96,51 @@ fun ReceiveScreen(
     val pairedHosts by app.pairedHosts.hosts.collectAsStateWithLifecycle()
     val history by app.history.entries.collectAsStateWithLifecycle()
     val discoveryStatus by app.discovery.status.collectAsStateWithLifecycle()
+    // Devices that can push TO this one (§15). A TV with a phone paired to it
+    // is connected even though it is nobody's client.
+    val peers by app.peers.peers.collectAsStateWithLifecycle()
+    // A §15 pair/start from a peer with no camera — in practice the Windows
+    // app. The six digits it needs are on THIS screen or nowhere: a TV
+    // notification is effectively invisible from a sofa.
+    val hostSessions by app.hostPairing.sessions.collectAsStateWithLifecycle()
     val profile = LocalDeviceProfile.current
+    val incomingPairRequest = hostSessions.firstOrNull {
+        it.origin == com.sendro.android.core.host.HostPairing.Origin.REMOTE
+    }
 
-    // Two candidate landing spots for the remote: the first offer's Accept
-    // when something is waiting, otherwise the device chip (the only thing on
-    // an idle Receive screen worth pressing).
+    val connected = pairedHosts.isNotEmpty() || peers.isNotEmpty()
+
+    // Where the remote lands, in priority order: a waiting offer, then — on a
+    // TV that is not connected to anything yet — the first of the two big
+    // "get started" actions, and otherwise the device chip.
     val offerFocus = remember { FocusRequester() }
     val chipFocus = remember { FocusRequester() }
+    val startFocus = remember { FocusRequester() }
     val hasOffers = incoming.isNotEmpty()
+    val showBigStart = profile.isTv && !connected
     RequestInitialFocus(
-        requester = if (hasOffers) offerFocus else chipFocus,
-        key = hasOffers,
+        requester = when {
+            hasOffers -> offerFocus
+            showBigStart -> startFocus
+            else -> chipFocus
+        },
+        key = Triple(hasOffers, showBigStart, profile.isTv),
     )
 
     val primaryHost = pairedHosts.firstOrNull { hostOnline[it.deviceId] == true }
         ?: pairedHosts.firstOrNull()
+
+    // Only ticks while a request is actually pending, so the idle home screen
+    // is not recomposing twice a second for nothing.
+    var pairClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(incomingPairRequest?.pairingId) {
+        if (incomingPairRequest == null) return@LaunchedEffect
+        while (true) {
+            pairClockMs = System.currentTimeMillis()
+            app.hostPairing.sweep()
+            kotlinx.coroutines.delay(500)
+        }
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         TopInsetSpacer()
@@ -143,6 +177,32 @@ fun ReceiveScreen(
                 }
             }
 
+            incomingPairRequest?.let { session ->
+                item {
+                    IncomingPairRequest(
+                        session = session,
+                        nowMs = pairClockMs,
+                    )
+                }
+            }
+
+            // §15 gave this device two ways to receive, and on a TV they are
+            // equally important: pull from a computer, or let a phone push.
+            // Burying either one in a settings sheet misrepresents the
+            // product, so on a TV both live on the home screen — large while
+            // nothing is connected, a compact row once something is.
+            if (profile.isTv) {
+                item {
+                    ConnectionActions(
+                        compact = connected,
+                        firstFocus = startFocus,
+                        onPairPc = onOpenDevices,
+                        onLetPhoneSend = onOpenReceiverPairing,
+                        modifier = Modifier.padding(top = if (connected) 4.dp else 14.dp),
+                    )
+                }
+            }
+
             if (incoming.isNotEmpty()) {
                 item {
                     SectionTag("Incoming", Sendro.irisSoft, Modifier.padding(top = 18.dp))
@@ -173,9 +233,11 @@ fun ReceiveScreen(
             } else if (active.isEmpty()) {
                 item {
                     ListeningSection(
-                        paired = pairedHosts.isNotEmpty(),
+                        connected = connected,
                         hostName = primaryHost?.name,
                         online = primaryHost != null && hostOnline[primaryHost.deviceId] == true,
+                        peerCount = peers.size,
+                        compact = profile.isTv && !connected,
                     )
                 }
             }
@@ -400,31 +462,156 @@ private fun OfferCard(
 }
 
 @Composable
-private fun ListeningSection(paired: Boolean, hostName: String?, online: Boolean) {
-    Column(modifier = Modifier.fillMaxWidth().padding(top = 18.dp)) {
-        ListeningRadar(modifier = Modifier.fillMaxWidth().height(180.dp))
-        Text(
-            text = if (!paired) "Pair your PC\nto start" else "Listening\non your Wi-Fi",
-            style = Sendro.sans(30f, FontWeight.SemiBold),
-            color = Sendro.textPrimary,
-            modifier = Modifier.padding(top = 6.dp),
-        )
+private fun ListeningSection(
+    connected: Boolean,
+    hostName: String?,
+    online: Boolean,
+    peerCount: Int,
+    /** True when the two big start actions are already carrying the screen. */
+    compact: Boolean,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(top = if (compact) 6.dp else 18.dp)) {
+        if (!compact) {
+            ListeningRadar(modifier = Modifier.fillMaxWidth().height(180.dp))
+            Text(
+                // Never "pair your PC to start": since §15 a computer is one
+                // of two equally valid ways in, and on a TV it is not even the
+                // likely one.
+                text = if (!connected) "Nothing connected\nyet" else "Listening\non your Wi-Fi",
+                style = Sendro.sans(30f, FontWeight.SemiBold),
+                color = Sendro.textPrimary,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
         Text(
             text = when {
+                !connected ->
+                    "Sendro is on your Wi-Fi and waiting. Connect a computer to pull files " +
+                        "from it, or let a phone push files straight here — either takes " +
+                        "about twenty seconds."
                 hostName == null ->
-                    "Open Sendro on your computer, then tap the device chip above to pair. " +
-                        "Files land here at full size, verified byte for byte."
+                    "Ready. ${peerCount} device${if (peerCount == 1) "" else "s"} can send " +
+                        "here — anything they send lands at full size, verified byte for byte."
                 online ->
                     "$hostName is online. Anything you send lands here at full size, " +
                         "verified byte for byte."
                 else ->
-                    "$hostName looks offline right now. Open Sendro on your PC on this " +
-                        "Wi-Fi and it will reconnect by itself."
+                    "$hostName looks offline right now. Open Sendro on that computer on " +
+                        "this Wi-Fi and it will reconnect by itself."
             },
             style = Sendro.sans(14f),
             color = Sendro.textBase.copy(alpha = 0.5f),
-            modifier = Modifier.padding(top = 12.dp).widthIn(max = 300.dp),
+            modifier = Modifier.padding(top = if (compact) 0.dp else 12.dp).widthIn(max = 380.dp),
         )
+    }
+}
+
+/**
+ * The two ways into Sendro, side by side and equally weighted.
+ *
+ * The distinction is genuinely hard to name — both are "pairing" — so the
+ * cards say what HAPPENS rather than what the protocol calls it: one is the
+ * computer sending here, the other is scanning a code with a phone. No
+ * jargon, one line each, readable from a sofa.
+ *
+ * Once something is connected they collapse to a quiet row: they are entry
+ * points, not the point of the screen.
+ */
+@Composable
+private fun ConnectionActions(
+    compact: Boolean,
+    firstFocus: FocusRequester?,
+    onPairPc: () -> Unit,
+    onLetPhoneSend: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (compact) {
+        Row(
+            modifier = modifier.fillMaxWidth().focusGroup(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            GhostPill(
+                title = "Pair a PC",
+                onClick = onPairPc,
+                height = 44.dp,
+                modifier = Modifier.weight(1f),
+            )
+            GhostPill(
+                title = "Let a phone send",
+                onClick = onLetPhoneSend,
+                height = 44.dp,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        return
+    }
+
+    Row(
+        modifier = modifier.fillMaxWidth().focusGroup(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        StartAction(
+            title = "Pair a PC",
+            line = "Your computer sends files here",
+            accent = Sendro.iris,
+            onClick = onPairPc,
+            focusRequester = firstFocus,
+            modifier = Modifier.weight(1f),
+        )
+        StartAction(
+            title = "Let a phone send",
+            line = "Scan a code with your phone to send from it",
+            accent = Sendro.teal,
+            onClick = onLetPhoneSend,
+            focusRequester = null,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun StartAction(
+    title: String,
+    line: String,
+    accent: Color,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester?,
+    modifier: Modifier = Modifier,
+) {
+    Pressable(
+        onClick = onClick,
+        modifier = modifier,
+        focusRequester = focusRequester,
+        focusCorner = 22.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 132.dp)
+                .glassCard(cornerRadius = 22.dp)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // A colour bar rather than an icon: it survives a badly calibrated
+            // TV panel and needs no new asset.
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(accent),
+            )
+            Text(
+                text = title,
+                style = Sendro.sans(21f, FontWeight.SemiBold),
+                color = Sendro.textPrimary,
+            )
+            Text(
+                text = line,
+                style = Sendro.sans(14f),
+                color = Sendro.textSecondary,
+            )
+        }
     }
 }
 

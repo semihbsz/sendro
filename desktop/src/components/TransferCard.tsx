@@ -5,6 +5,7 @@ import { IconRetry, IconX } from "../icons";
 import { PhasePill, ProgressRing, Sparkline, ringFraction } from "./transfer";
 import { FileName } from "./common";
 import { targetForTransfer } from "../preview";
+import { canRetry, retrySend } from "../targets";
 import type { TransferSummary } from "../types";
 
 export const RETRYABLE = new Set(["failed", "interrupted", "expired"]);
@@ -79,11 +80,13 @@ export function TransferCard({ t }: { t: TransferSummary }) {
           </div>
         </div>
         <Sparkline samples={samples} maxHeight={26} />
-        {RETRYABLE.has(t.state) ? (
+        {canRetry(t) ? (
           <button
             className="icon-btn verify"
-            title="Retry"
-            onClick={() => void api.retryTransfer(t.transferId)}
+            // A push to a peer has no ranged upload (§7): retrying it sends
+            // the whole file again, as a new transfer.
+            title={t.isPeer ? "Send again from the start" : "Retry"}
+            onClick={() => void retrySend(t)}
           >
             <IconRetry size={13} />
           </button>

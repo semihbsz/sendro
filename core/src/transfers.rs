@@ -102,6 +102,17 @@ pub(crate) struct TransferRecord {
     pub seq: u64,
     pub speed: SpeedWindow,
     pub last_emit: Option<Instant>,
+    /// True for a §7 push *we* make to a peer host (peers.rs), as opposed to
+    /// an offer a client pulls from us.
+    ///
+    /// These records share the queue and history with everything else — that
+    /// is the point — but they must never touch the host-side machinery:
+    /// they are not offers, so they are excluded from the outbox, from
+    /// `offers.json`, from accept/reject/status, from the download route and
+    /// from `retry_transfer`. Without this flag a peer that is *also* paired
+    /// to us (same deviceId, both directions) would find our outgoing pushes
+    /// in its outbox.
+    pub is_peer: bool,
 }
 
 impl TransferRecord {
@@ -130,6 +141,7 @@ impl TransferRecord {
             device_id: self.device_id,
             device_name: self.device_name.clone(),
             direction: self.direction.as_str().to_string(),
+            is_peer: self.is_peer,
             bytes_transferred: self.bytes_transferred,
             speed_bps,
             eta_seconds,
@@ -311,6 +323,7 @@ impl Core {
                 seq: self.next_seq(),
                 speed: SpeedWindow::default(),
                 last_emit: None,
+                is_peer: false,
             };
             let id = rec.transfer_id;
             self.transfers.write().insert(id, rec);
@@ -384,6 +397,7 @@ impl Core {
             .values()
             .filter(|r| {
                 r.direction == Direction::Outgoing
+                    && !r.is_peer
                     && r.device_id == device_id
                     && matches!(
                         r.state,
@@ -496,7 +510,9 @@ impl Core {
     ) -> Result<T, TransferError> {
         let mut transfers = self.transfers.write();
         match transfers.get_mut(&id) {
-            Some(rec) if rec.device_id == device_id => Ok(f(rec)),
+            // `!is_peer`: our own pushes to a peer are not that peer's
+            // transfers, even though they carry its deviceId.
+            Some(rec) if rec.device_id == device_id && !rec.is_peer => Ok(f(rec)),
             _ => Err(TransferError::NotFound),
         }
     }
@@ -630,6 +646,7 @@ impl Core {
             match transfers.get_mut(&id) {
                 Some(rec)
                     if rec.direction == Direction::Outgoing
+                        && !rec.is_peer
                         && matches!(
                             rec.state,
                             TransferState::Failed
@@ -676,6 +693,7 @@ impl Core {
                 .values()
                 .filter(|r| {
                     r.direction == Direction::Outgoing
+                        && !r.is_peer
                         && !r.state.is_terminal()
                         && r.sha256.is_some()
                 })
@@ -767,6 +785,7 @@ impl Core {
                 seq: self.next_seq(),
                 speed: SpeedWindow::default(),
                 last_emit: None,
+                is_peer: false,
             };
             transfers.insert(rec.transfer_id, rec);
         }

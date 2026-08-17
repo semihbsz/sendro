@@ -47,6 +47,24 @@ impl Core {
     pub fn dismiss_message(&self, message_id: Uuid) -> bool;  // discards it forever
     pub fn clear_messages(&self);
 
+    // peers — this PC as a *client* (PROTOCOL.md §4/§7/§11.2/§15).
+    // Mirror image of `trusted_devices`: those pair TO this PC and pull from
+    // it; these are devices this PC pairs TO and pushes to. A device can be
+    // in both lists.
+    pub fn discovered_peers(&self) -> Vec<DiscoveredPeer>;   // live mDNS browse
+    pub async fn pair_with_peer(&self, address: String, port: u16)
+        -> anyhow::Result<PeerPairingSession>;               // §4.1 + /info check
+    pub async fn confirm_peer_pairing(&self, pairing_id: String, code: String)
+        -> anyhow::Result<PairedPeer>;                       // §4.2 proof
+    pub fn paired_peers(&self) -> Vec<PairedPeer>;
+    pub fn forget_peer(&self, device_id: Uuid) -> bool;
+    pub async fn ping_peer(&self, device_id: Uuid) -> bool;  // §4.3, self-heals address
+    pub async fn send_files_to_peer(&self, device_id: Uuid, paths: Vec<PathBuf>)
+        -> anyhow::Result<Vec<TransferSummary>>;             // §7 push, folders expanded
+    pub async fn send_message_to_peer(&self, device_id: Uuid, text: String)
+        -> anyhow::Result<()>;                               // §11.2
+    pub fn refresh_peers(&self);                             // re-emit PeersChanged
+
     // watch folders
     pub fn add_watch_folder(&self, cfg: WatchFolderConfig) -> anyhow::Result<()>;
     pub fn remove_watch_folder(&self, id: Uuid) -> bool;
@@ -74,6 +92,7 @@ pub struct TransferSummary {
     transfer_id: Uuid, batch_id: Uuid, file_name: String, size_bytes: u64,
     sha256: Option<String>, state: TransferState, error: Option<String>,
     device_id: Uuid, device_name: String, direction: String, // "outgoing" | "incoming"
+    is_peer: bool,          // true = a §7 push to a peer host, not a pull-offer
     bytes_transferred: u64, speed_bps: u64, eta_seconds: Option<u64>,
     started_at_ms: Option<i64>, source_path: Option<String>,
 }
@@ -97,6 +116,27 @@ pub struct IncomingMessage { message_id: Uuid, text: String, sender_name: String
 // constants: messages::MAX_MESSAGE_BYTES = 32 * 1024, messages::MAX_INBOX = 20,
 //            messages::MAX_INCOMING = 20
 
+// Peers (PROTOCOL.md §2 discovery, §4 pairing, §15 receiver hosts)
+
+pub struct DiscoveredPeer {
+    device_id: Uuid, device_name: String, platform: String,
+    address: String, port: u16, protocol_version: u32, last_seen_ms: i64,
+    paired: bool,     // already in trusted_devices.json OR peers.json
+    reachable: bool,  // the last GET /info probe answered
+}
+
+pub struct PairedPeer {
+    device_id: Uuid, device_name: String, platform: String,
+    address: String, port: u16, paired_at_ms: i64, last_seen_ms: Option<i64>,
+    receive_only: bool,   // it answers 404 on the outbox (§15.1) — expected
+}
+// NB: no token field. The raw bearer token stays in the core.
+
+pub struct PeerPairingSession {
+    pairing_id: Uuid, device_id: Uuid, device_name: String, platform: String,
+    address: String, port: u16, expires_in_seconds: u64,
+}
+
 pub enum CoreEvent {
     PairingStarted { pairing_id: Uuid, code: String, device_name: String }, // SHOW CODE IN UI
     PairingCompleted { device: TrustedDevice },
@@ -104,6 +144,7 @@ pub enum CoreEvent {
     TransferUpdated { transfer: TransferSummary },
     WatchFileDetected { detection_id: Uuid, path: String, folder_id: Uuid, file_name: String, size_bytes: u64, auto: bool },
     MessageReceived { message_id: Uuid, text: String, sender_name: String, received_at_ms: i64 }, // §11.2, ephemeral
+    PeersChanged { peers: Vec<DiscoveredPeer> },  // §2 live browse, debounced ~500 ms
     ServerStarted { port: u16 },
 }
 // serialized with #[serde(tag = "type", rename_all = "camelCase")]
@@ -117,9 +158,58 @@ state from `queue()`/`history()` snapshots + `core-event` deltas.
 `MessageReceived` also raises the main window (like `PairingStarted`) so the
 card is visible when Sendro is minimized to tray.
 
+## Peers: the PC as a client (PROTOCOL.md §4/§7/§11.2/§15)
+
+Until now the PC was host-only: it advertised over mDNS and waited. It now
+also **browses** and **pushes**, symmetric with the phone.
+
+* **Discovery** runs for the life of the process (`discovery::browse_loop`),
+  not per request: one `ServiceDaemon` both advertises and browses, results
+  land in a live map keyed by mDNS fullname, each peer is probed with
+  `GET /api/v1/info` (on discovery and every 30 s), and changes are published
+  as `PeersChanged`, debounced 500 ms. Our own advertisement is excluded by
+  `deviceId`. An interface change re-registers the advertisement *and*
+  restarts the browse — one trigger, both directions.
+* **Trust is stored in two places, on purpose:**
+
+  | direction | we are | secret at rest | file |
+  |---|---|---|---|
+  | device → PC | host | `SHA-256(token)` | `trusted_devices.json` |
+  | PC → peer | client | the **raw** token | `peers.json` |
+
+  A client cannot authenticate with a hash, so `peers.json` necessarily holds
+  password-equivalent material. It is written with
+  `state::atomic_write_json_private` (mode `0600` on unix, the user-scoped
+  `%APPDATA%` ACL on Windows), the token never leaves the core (neither
+  `PairedPeer` nor any event carries it), and the 6-digit pairing **code** is
+  never persisted anywhere — it exists just long enough to derive the §4.2
+  proof.
+* **Sending** to a peer is a §7 upload: hash the file, then stream it in
+  ≤1 MiB chunks with `X-Sendro-Sha256` and an RFC 5987 `X-Sendro-File-Name`,
+  with an explicit `Content-Length`. These transfers share the queue and
+  history with everything else (`direction: "outgoing"`, `is_peer: true`), so
+  Flow shows progress/speed/ETA/cancel unchanged. `422` → `Failed` with error
+  `IntegrityMismatch`; retry means resending from byte 0, because §7 has no
+  ranged upload. Peer transfers are excluded from the outbox, `offers.json`,
+  the download route and `retry_transfer` — they are pushes, not offers.
+* **A `404` on the peer's outbox means receive-only** (§15.1) and is never an
+  error. It is probed once at pairing (and again on ping only while the flag
+  is set, since a `404` cannot drain a message).
+* Concurrency respects the user's setting: at most `Settings::concurrency`
+  uploads in flight per call.
+
 ## Tauri commands beyond the 1:1 core wrappers
 
 ```
+discovered_peers()                -> DiscoveredPeer[]
+pair_with_peer(address, port)     -> Result<PeerPairingSession, String>
+confirm_peer_pairing(pairingId, code) -> Result<PairedPeer, String>
+paired_peers()                    -> PairedPeer[]
+forget_peer(deviceId)             -> bool
+ping_peer(deviceId)               -> Result<bool, String>
+send_files_to_peer(deviceId, paths) -> Result<TransferSummary[], String>
+send_message_to_peer(deviceId, text) -> Result<(), String>
+refresh_peers()                   -> void
 send_message(deviceId, text)      -> Result<(), String>       // Core::send_message
 incoming_messages()               -> IncomingMessage[]        // Core::incoming_messages
 dismiss_message(id)               -> bool                     // Core::dismiss_message

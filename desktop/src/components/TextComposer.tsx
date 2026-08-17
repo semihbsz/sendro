@@ -7,11 +7,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { useAppDispatch, useAppState } from "../store";
-import * as api from "../api";
-import { isOnline } from "../format";
 import { IconPhone } from "../icons";
 import { EmptyState } from "./common";
-import { MAX_MESSAGE_BYTES, type TrustedDevice } from "../types";
+import { sendTargets, sendTextTo, type SendTarget } from "../targets";
+import { MAX_MESSAGE_BYTES } from "../types";
 
 const encoder = new TextEncoder();
 
@@ -21,7 +20,8 @@ function byteLength(text: string): number {
 }
 
 export function TextComposer() {
-  const { composerText, devices, chipDeviceId } = useAppState();
+  const { composerText, composerTarget, devices, peers, chipDeviceId } =
+    useAppState();
   const dispatch = useAppDispatch();
   const open = composerText !== null;
 
@@ -29,8 +29,10 @@ export function TextComposer() {
   return (
     <Composer
       initialText={composerText}
-      devices={devices}
-      chipDeviceId={chipDeviceId}
+      // Both directions of trust are valid targets for text (§11.1 rides the
+      // outbox for a device; §11.2 posts straight to a peer).
+      targets={sendTargets(devices, peers)}
+      preferredId={composerTarget ?? chipDeviceId}
       onClose={() => dispatch({ type: "close-composer" })}
     />
   );
@@ -38,26 +40,24 @@ export function TextComposer() {
 
 function Composer({
   initialText,
-  devices,
-  chipDeviceId,
+  targets,
+  preferredId,
   onClose,
 }: {
   initialText: string;
-  devices: TrustedDevice[];
-  chipDeviceId: string | null;
+  targets: SendTarget[];
+  preferredId: string | null;
   onClose: () => void;
 }) {
   const [text, setText] = useState(initialText);
   // Same target the file-send flow would use: the top-bar chip's device when
   // it is still paired, else the first online one, else the first paired one.
-  const [target, setTarget] = useState<string>(() => {
-    if (chipDeviceId && devices.some((d) => d.deviceId === chipDeviceId)) {
-      return chipDeviceId;
+  const [targetId, setTargetId] = useState<string>(() => {
+    if (preferredId && targets.some((t) => t.deviceId === preferredId)) {
+      return preferredId;
     }
     return (
-      devices.find((d) => isOnline(d.lastSeenMs))?.deviceId ??
-      devices[0]?.deviceId ??
-      ""
+      targets.find((t) => t.online)?.deviceId ?? targets[0]?.deviceId ?? ""
     );
   });
   const [sending, setSending] = useState(false);
@@ -77,15 +77,15 @@ function Composer({
 
   const bytes = byteLength(text);
   const tooLong = bytes > MAX_MESSAGE_BYTES;
-  const canSend =
-    !sending && text.length > 0 && !tooLong && target !== "" && devices.length > 0;
+  const target = targets.find((t) => t.deviceId === targetId) ?? null;
+  const canSend = !sending && text.length > 0 && !tooLong && target !== null;
 
   const send = async () => {
     if (!canSend) return;
     setSending(true);
     setError(null);
     try {
-      await api.sendMessage(target, text);
+      await sendTextTo(target, text);
       setText("");
       setSent(true);
       areaRef.current?.focus();
@@ -100,11 +100,11 @@ function Composer({
 
   return (
     <Modal title="Send text" onClose={onClose} cancelLabel="Close">
-      {devices.length === 0 ? (
+      {targets.length === 0 ? (
         <EmptyState
           icon={<IconPhone size={22} />}
           title="No paired devices"
-          subtitle="Open Sendro on your iPhone and tap this PC to pair."
+          subtitle="Pair a phone with this PC, or pair this PC with a phone or TV from Settings › Devices."
         />
       ) : (
         <>
@@ -133,14 +133,14 @@ function Composer({
             <span className="composer-foot-spacer" />
             <select
               className="target-select"
-              value={target}
+              value={targetId}
               title="Send to"
-              onChange={(e) => setTarget(e.target.value)}
+              onChange={(e) => setTargetId(e.target.value)}
             >
-              {devices.map((d) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.deviceName}
-                  {isOnline(d.lastSeenMs) ? "" : " (offline)"}
+              {targets.map((t) => (
+                <option key={t.deviceId} value={t.deviceId}>
+                  {t.deviceName}
+                  {t.online ? "" : " (offline)"}
                 </option>
               ))}
             </select>

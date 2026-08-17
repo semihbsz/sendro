@@ -2,9 +2,10 @@ import { useState } from "react";
 import { Modal } from "./Modal";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
-import { baseName, formatRelative, isOnline } from "../format";
+import { baseName, formatRelative } from "../format";
 import { IconChevronRight, IconPhone } from "../icons";
 import { EmptyState } from "./common";
+import { platformIcon, sendFilesTo, sendTargets } from "../targets";
 
 /** File extension badge text, e.g. "MOV" — falls back to a count. */
 function badgeFor(paths: string[]): string {
@@ -20,23 +21,27 @@ function badgeFor(paths: string[]): string {
 /** Shown when files are pending (drop / picker / tray) and a target
  *  device needs to be chosen. */
 export function DevicePicker() {
-  const { pendingPaths, devices } = useAppState();
+  const { pendingPaths, devices, peers } = useAppState();
   const dispatch = useAppDispatch();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!pendingPaths || pendingPaths.length === 0) return null;
 
+  // Devices that pull from this PC *and* peers this PC pushes to — one list,
+  // because from here they are the same thing: somewhere to send.
+  const targets = sendTargets(devices, peers);
+
   const close = () => {
     dispatch({ type: "set-pending", paths: null });
     setError(null);
   };
 
-  const send = async (deviceId: string) => {
+  const send = async (target: (typeof targets)[number]) => {
     setSending(true);
     setError(null);
     try {
-      await api.offerFiles(deviceId, pendingPaths, false);
+      await sendFilesTo(target, pendingPaths);
       dispatch({ type: "set-pending", paths: null });
       dispatch({ type: "set-view", view: "flow" });
       const queue = await api.getQueue();
@@ -67,41 +72,39 @@ export function DevicePicker() {
         </div>
       </div>
 
-      {devices.length === 0 ? (
+      {targets.length === 0 ? (
         <EmptyState
           icon={<IconPhone size={22} />}
           title="No paired devices"
-          subtitle="Open Sendro on your iPhone and tap this PC to pair."
+          subtitle="Pair a phone with this PC, or pair this PC with a phone or TV — Settings › Devices."
         />
       ) : (
-        devices.map((d) => {
-          const online = isOnline(d.lastSeenMs);
-          return (
-            <button
-              key={d.deviceId}
-              className="picker-device"
-              disabled={sending}
-              onClick={() => void send(d.deviceId)}
-            >
-              <span className={`picker-device-dot${online ? "" : " off"}`}>
-                <span className="dot" />
+        targets.map((t) => (
+          <button
+            key={t.deviceId}
+            className="picker-device"
+            disabled={sending}
+            onClick={() => void send(t)}
+          >
+            <span className={`picker-device-dot${t.online ? "" : " off"}`}>
+              <span className="dot" />
+            </span>
+            <span className="picker-device-icon">{platformIcon(t.platform, 15)}</span>
+            <span className="picker-device-main">
+              <span className="picker-device-name">{t.deviceName}</span>
+              <span className={`picker-device-state${t.online ? "" : " off"}`}>
+                {t.online
+                  ? "online now"
+                  : t.kind === "peer"
+                    ? `${t.address}:${t.port}`
+                    : `last seen ${formatRelative(t.lastSeenMs)}`}
               </span>
-              <span className="picker-device-main">
-                <span className="picker-device-name">{d.deviceName}</span>
-                <span
-                  className={`picker-device-state${online ? "" : " off"}`}
-                >
-                  {online
-                    ? "online now"
-                    : `last seen ${formatRelative(d.lastSeenMs)}`}
-                </span>
-              </span>
-              <span className="picker-device-chev">
-                <IconChevronRight size={12} />
-              </span>
-            </button>
-          );
-        })
+            </span>
+            <span className="picker-device-chev">
+              <IconChevronRight size={12} />
+            </span>
+          </button>
+        ))
       )}
 
       {error ? <div className="error-note">{error}</div> : null}

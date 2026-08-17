@@ -20,6 +20,53 @@ export interface TrustedDevice {
   lastSeenMs: number | null;
 }
 
+/* ------------------------------------------------------------------ *
+ * Peers — devices this PC can send *to* (PROTOCOL.md §4/§7/§15)
+ *
+ * The mirror image of `TrustedDevice`, which is a device that sends *to*
+ * this PC. A device can legitimately be both.
+ * ------------------------------------------------------------------ */
+
+/** A peer seen on the LAN by the live mDNS browser. */
+export interface DiscoveredPeer {
+  deviceId: string;
+  deviceName: string;
+  /** Informational only (§15.1) — capability comes from /info + the outbox. */
+  platform: string;
+  address: string;
+  port: number;
+  protocolVersion: number;
+  lastSeenMs: number;
+  /** Already trusted in either direction. */
+  paired: boolean;
+  /** The last /info probe answered. */
+  reachable: boolean;
+}
+
+/** A peer this PC has paired with and holds a token for. */
+export interface PairedPeer {
+  deviceId: string;
+  deviceName: string;
+  platform: string;
+  address: string;
+  port: number;
+  pairedAtMs: number;
+  lastSeenMs: number | null;
+  /** It answers 404 on the outbox: it can receive, never offer (§15.1). */
+  receiveOnly: boolean;
+}
+
+/** An outbound pairing session, waiting for the code shown on the peer. */
+export interface PeerPairingSession {
+  pairingId: string;
+  deviceId: string;
+  deviceName: string;
+  platform: string;
+  address: string;
+  port: number;
+  expiresInSeconds: number;
+}
+
 export type TransferState =
   | "queued"
   | "hashing"
@@ -48,6 +95,13 @@ export interface TransferSummary {
   deviceId: string;
   deviceName: string;
   direction: TransferDirection;
+  /**
+   * True when this PC *pushed* the file to a peer host (§7) instead of
+   * offering it for pull. Retrying one starts over from byte 0 — §7 has no
+   * ranged upload — so the UI sends it again rather than calling
+   * `retry_transfer`.
+   */
+  isPeer: boolean;
   bytesTransferred: number;
   speedBps: number;
   etaSeconds: number | null;
@@ -257,6 +311,8 @@ export type CoreEvent =
   | { type: "linkSessionChanged"; session: LinkSession | null }
   /** §14.2 — a guest pushed a file through the link session. */
   | { type: "guestUpload"; fileName: string; sizeBytes: number }
+  /** §2 — the live LAN browse changed (debounced ~500 ms in the core). */
+  | { type: "peersChanged"; peers: DiscoveredPeer[] }
   | { type: "serverStarted"; port: number };
 
 /** A pending watch-folder detection shown in the Watch Folders feed. */

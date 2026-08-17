@@ -62,6 +62,7 @@ import com.sendro.android.ui.components.AccentPill
 import com.sendro.android.ui.components.FileBadge
 import com.sendro.android.ui.components.GhostPill
 import com.sendro.android.ui.components.NoticeCard
+import com.sendro.android.ui.components.PlatformNames
 import com.sendro.android.ui.components.Pressable
 import com.sendro.android.ui.components.RequestInitialFocus
 import com.sendro.android.ui.components.SectionTag
@@ -436,13 +437,7 @@ private fun TargetPicker(
  * for the §7 upload the Send queue already speaks — the only difference the
  * user needs to see is which box the file is going to.
  */
-private fun platformLabel(host: PairedHost): String = when (host.platform.lowercase()) {
-    "androidtv" -> "TV"
-    "android" -> "phone"
-    "ios" -> "iPhone"
-    "windows" -> "PC"
-    else -> host.platform.ifBlank { "device" }
-}
+private fun platformLabel(host: PairedHost): String = PlatformNames.label(host.platform)
 
 @Composable
 private fun TrayCard(

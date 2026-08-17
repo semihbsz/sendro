@@ -484,7 +484,11 @@ async fn download_file(
     // only in Accepted / Transferring / Interrupted.
     let (source_path, size, sha256, mime_type, file_name) = {
         let transfers = core.transfers.read();
-        let Some(rec) = transfers.get(&id).filter(|r| r.device_id == device.device_id)
+        // `!is_peer`: a §7 push of ours to this same device is not something
+        // it may download from us (peers.rs / transfers.rs `is_peer`).
+        let Some(rec) = transfers
+            .get(&id)
+            .filter(|r| r.device_id == device.device_id && !r.is_peer)
         else {
             return api_error(StatusCode::NOT_FOUND, "not_found", None);
         };
@@ -890,6 +894,7 @@ pub(crate) async fn receive_upload(
             seq: core.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             speed: SpeedWindow::default(),
             last_emit: None,
+            is_peer: false,
         };
         core.transfers.write().insert(transfer_id, rec);
     }

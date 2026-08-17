@@ -285,6 +285,32 @@ and then throws still shows a message instead of crashing.
 - **Transfers survive leaving the app** — the foreground service and its
   ongoing notification work the same on TV.
 
+### Cleartext on the LAN
+
+Sendro speaks plain HTTP to peers by design (PROTOCOL.md §3). Android has
+blocked cleartext by default since API 28, so without a policy **every
+outbound request failed** — pairing, downloads, uploads, messages. The symptom
+was `CLEARTEXT communication to 192.168.1.103 not permitted by network
+security policy`, and it was asymmetric in a confusing way: the inbound
+receiver host still worked, so phone → TV succeeded while TV → PC did not.
+
+`res/xml/network_security_config.xml` permits cleartext in `base-config` and
+pins `github.com` / `githubusercontent.com` back to HTTPS-only with a
+`domain-config`, so the update check can never silently downgrade. It cannot be
+narrowed to "private ranges only": `<domain>` matches host names and exact IP
+literals, and **the platform does not support CIDR ranges** — a peer's address
+is whatever the router handed out.
+
+The manifest sets both `android:networkSecurityConfig` and
+`android:usesCleartextTraffic="true"`; the latter covers API 26–27, where the
+manifest flag is still consulted.
+
+There is no `ConnectionSpec` anywhere in the app, so OkHttp keeps its default
+`[MODERN_TLS, CLEARTEXT]` and does not reject plain HTTP on its own. If anyone
+ever adds `connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))` for the update
+client, it must be on a *separate* client from `SendroClient.Clients` or every
+LAN call breaks again.
+
 ### Sending TO the TV (receiver host, PROTOCOL.md §15)
 
 Until §15 the TV could only be a *client* of the PC, which made phone → TV
@@ -328,6 +354,22 @@ peer is receive-only. Sendro's own poll loop latches it, stops long-polling,
 and falls back to a cheap ten-second ping so the device still shows as online.
 The Devices list labels such a peer "receive-only" rather than "broken".
 
+#### Peers are named, not assumed
+
+The receiver host is paired to by phones **and** by the Windows app, so
+nothing says "phone" by assumption. `PlatformNames` turns the §5 / §2-TXT
+`platform` string into wording ("PC", "phone", "TV", "iPhone") and a glyph, and
+it is used by the paired-peer list, the Send target chip and the incoming
+pair-request banner alike.
+
+The two pairing bodies deliberately have **no platform default that names a
+platform**: `PairStartRequest.platform` defaults to `""` and
+`PairConfirmRequest.platform` to `null`. They are used in both directions now
+— encoded when this app pairs to a PC, decoded when a PC pairs to this device —
+and a default of `"android"` would have silently labelled a Windows peer as an
+Android one. This app also reports `androidtv` rather than `android` when it is
+a TV, so a PC's device list shows a TV as a TV.
+
 #### PC → TV: two legitimate paths (§15.3)
 
 - **PC as host, TV as client** (the original, still preferred): the PC offers,
@@ -367,6 +409,33 @@ handled, and an upload is streamed to its destination 1 MiB at a time.
 An 8 GB movie costs one 1 MiB buffer and **one** pass over storage: the upload
 is written straight into its final MediaStore row rather than to a temp file
 that then gets copied.
+
+### The TV home screen
+
+A TV is a pure receiver, and since §15 there are two equally valid ways to
+feed it. Both are on the home screen, side by side, not buried in a sheet:
+
+| action | one-liner | what it opens |
+|---|---|---|
+| **Pair a PC** | "Your computer sends files here" | the Devices sheet (discovery, pairing, manual IP) |
+| **Let a phone send** | "Scan a code with your phone to send from it" | the receiver-pairing screen with the big QR |
+
+While nothing is connected they are large glass cards with an accent bar and
+the D-pad lands on the first of them. Once anything is paired — in *either*
+direction — they collapse into a quiet two-button row under the header and
+focus goes back to the device chip. They are entry points, not the point of
+the screen.
+
+The empty state no longer says "Pair your PC to start"; it says "Nothing
+connected yet" and names both paths, because a computer is no longer required.
+
+If a peer with no camera (in practice the Windows app) sends a `pair/start`,
+the six digits it needs appear **on the home screen** as a banner naming the
+device, with the code set at roughly twice body size and spaced — a TV
+notification is invisible from a sofa, so the digits have to be where the user
+is already looking. The banner also appears on the receiver-pairing screen.
+
+Phones are untouched: the whole block is gated on `DeviceProfile.isTv`.
 
 ### Movies: the TV's own player comes first
 
@@ -553,6 +622,17 @@ Honest list, in rough order of how likely they are to bite:
 21. **`getPackageArchiveInfo` returns null for some APKs** (v2-signing-only
     edge cases, or a corrupt archive). Sendro then shows a plain warning
     instead of package details and still lets the user install deliberately.
+22. **The cleartext policy is global.** `base-config` permits plain HTTP to
+    *any* host that is not github; it cannot be limited to RFC1918 ranges
+    because the platform's `<domain>` has no CIDR form. The mitigation is that
+    the only non-LAN URL in the app is the pinned update manifest.
+23. **The Windows client role is new on both sides.** The TV's host has never
+    seen a `pair/start` from the real Windows app — the field names and the
+    `platform` string are per §4.1, but the first handshake is where a
+    mismatch would show.
+24. **The home-screen pair banner ticks a 500 ms clock** while a request is
+    pending. It stops when the session clears, but a session that somehow
+    never expires would keep the TV home screen recomposing.
 
 ## Privacy, restated
 

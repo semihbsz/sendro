@@ -74,6 +74,14 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
     /** True on an Android TV. Decides §15.4's default and the UI's ten-foot mode. */
     val isTelevision: Boolean by lazy { DeviceKind.isTelevision(this) }
 
+    /**
+     * The §5 `platform` string this device reports to peers — `androidtv` on a
+     * TV, `android` otherwise. Used both when this device HOSTS (in
+     * `/api/v1/info`) and when it pairs as a CLIENT, so a PC's device list
+     * shows a TV as a TV.
+     */
+    val platform: String by lazy { DeviceKind.platformString(this) }
+
     override fun onCreate() {
         super.onCreate()
 

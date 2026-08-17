@@ -15,6 +15,7 @@ pub mod link;
 pub mod messages;
 pub mod net;
 pub mod pairing;
+pub mod peers;
 pub mod qr;
 pub mod range;
 pub mod server;
@@ -40,13 +41,14 @@ pub use config::CoreConfig;
 pub use events::CoreEvent;
 pub use link::{LinkFile, LinkOptions, LinkSession};
 pub use net::NetIface;
+pub use peers::{PairedPeer, PeerPairingSession};
 pub use qr::{QrPairing, QrUrl};
 pub use types::{
-    DiscoveredHost, HistoryEntry, HostInfo, IncomingMessage, Message, Settings, TransferState,
-    TransferSummary, TrustedDevice, WatchFolderConfig,
+    DiscoveredHost, DiscoveredPeer, HistoryEntry, HostInfo, IncomingMessage, Message, Settings,
+    TransferState, TransferSummary, TrustedDevice, WatchFolderConfig,
 };
 
-use state::{Identity, StoredDevice};
+use state::{Identity, StoredDevice, StoredPeer};
 use transfers::TransferRecord;
 use types::{now_ms, PLATFORM, PROTOCOL_VERSION};
 use watch::PendingDetection;
@@ -61,6 +63,25 @@ pub struct Core {
     pub(crate) events: broadcast::Sender<CoreEvent>,
     pub(crate) pairings: pairing::PairingManager,
     pub(crate) trusted: RwLock<Vec<StoredDevice>>,
+
+    /// Outbound trust — peers *we* paired with (peers.rs). Kept apart from
+    /// `trusted` because the two hold different secrets: a hash there, a raw
+    /// bearer token here. Persisted to `peers.json` with restricted
+    /// permissions; see [`state::StoredPeer`].
+    pub(crate) peers: RwLock<Vec<StoredPeer>>,
+    /// Outbound pairing sessions waiting for the user to type the peer's
+    /// 6-digit code. RAM only, and the code itself is never in here.
+    pub(crate) pending_peer_pairings: Mutex<HashMap<Uuid, peers::PendingPeerPairing>>,
+    /// Live mDNS browse results, keyed by service fullname.
+    pub(crate) discovered: RwLock<HashMap<String, discovery::DiscoveredEntry>>,
+    /// Poked when the set of local interfaces changed, so the browser starts
+    /// a fresh query round (the same trigger that re-registers our own
+    /// advertisement).
+    pub(crate) rebrowse: Arc<Notify>,
+    /// One shared HTTP client for the client role (pair / ping / upload /
+    /// messages). Proxy-free on purpose: a corporate `HTTP_PROXY` in the
+    /// environment must never intercept LAN traffic.
+    pub(crate) http: reqwest::Client,
 
     pub(crate) transfers: RwLock<HashMap<Uuid, TransferRecord>>,
     pub(crate) seq: AtomicU64,
@@ -149,6 +170,7 @@ impl Core {
 
         let trusted: Vec<StoredDevice> =
             state::load_json(&cfg.data_dir.join(state::TRUSTED_DEVICES_FILE)).unwrap_or_default();
+        let peers = Core::load_peers(&cfg.data_dir);
         let history: Vec<HistoryEntry> =
             state::load_json(&cfg.data_dir.join(state::HISTORY_FILE)).unwrap_or_default();
         let watch_folders: Vec<WatchFolderConfig> =
@@ -169,6 +191,11 @@ impl Core {
             events,
             pairings: pairing::PairingManager::new(),
             trusted: RwLock::new(trusted),
+            peers: RwLock::new(peers),
+            pending_peer_pairings: Mutex::new(HashMap::new()),
+            discovered: RwLock::new(HashMap::new()),
+            rebrowse: Arc::new(Notify::new()),
+            http: build_http_client(),
             transfers: RwLock::new(HashMap::new()),
             seq: AtomicU64::new(1),
             outbox_notify: Mutex::new(HashMap::new()),
@@ -230,9 +257,21 @@ impl Core {
 
         // mDNS advertisement (best effort — a broken multicast stack must
         // not prevent manual ip:port connections from working).
+        // mDNS advertisement + browse (best effort — a broken multicast stack
+        // must not prevent manual ip:port connections from working).
         if core.mdns_enabled {
             match discovery::advertise(&core) {
-                Ok(daemon) => *core.mdns.lock() = Some(daemon),
+                Ok(daemon) => {
+                    // One daemon, both directions: we advertise ourselves and
+                    // browse for everyone else (§2, §15.1).
+                    let browse_task = tokio::spawn(discovery::browse_loop(
+                        core.clone(),
+                        daemon.clone(),
+                        core.shutdown_tx.subscribe(),
+                    ));
+                    core.tasks.lock().push(browse_task);
+                    *core.mdns.lock() = Some(daemon);
+                }
                 Err(e) => tracing::warn!("mDNS advertisement unavailable: {e}"),
             }
         }
@@ -262,6 +301,7 @@ impl Core {
             let _ = daemon.shutdown();
         }
         self.save_trusted();
+        self.save_peers();
         self.save_history();
         self.save_offers();
     }
@@ -338,7 +378,12 @@ impl Core {
         self.paused.load(Ordering::SeqCst)
     }
 
-    // -- discovery (future desktop features) --------------------------------
+    // -- discovery ----------------------------------------------------------
+    //
+    // The live browser lives in discovery.rs (`discovered_peers`,
+    // `CoreEvent::PeersChanged`); this is the one-shot snapshot, kept for
+    // callers that just want "who is out there right now" without
+    // subscribing.
 
     /// Browse the LAN for other Sendro instances for `timeout`.
     pub async fn discover(&self, timeout: Duration) -> Vec<DiscoveredHost> {
@@ -471,7 +516,30 @@ impl Core {
                 tracing::info!("mDNS: re-advertised after an interface change");
             }
         }
+        // Same event, other direction: re-browse so peers on the new
+        // interface show up now rather than at the next periodic query.
+        //
+        // `notify_one`, not `notify_waiters`: the browser may be busy in
+        // another `select!` branch at this instant, and a permit that waits
+        // for it is the difference between "picks up the hotspot" and
+        // "silently misses it".
+        self.rebrowse.notify_one();
     }
+}
+
+/// The HTTP client used for the *client* role (peers.rs).
+///
+/// * `no_proxy()` — LAN addresses must never be routed through an
+///   `HTTP_PROXY` picked up from the environment.
+/// * no global timeout — an upload is bounded by its own progress, not by a
+///   clock; the small control calls set their own per-request timeout.
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent(concat!("Sendro/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_default()
 }
 
 /// Bind `preferred`; on conflict fall back to preferred+1..=preferred+20.
@@ -512,6 +580,7 @@ async fn maintenance_loop(core: Arc<Core>, mut shutdown: tokio_watch::Receiver<b
         }
         core.expire_stale_offers();
         core.reap_expired_link();
+        core.purge_peer_pairings();
         for pairing_id in core.pairings.purge_expired() {
             core.emit(CoreEvent::PairingFailed { pairing_id });
         }

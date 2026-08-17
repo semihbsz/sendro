@@ -574,7 +574,9 @@ private suspend fun runPairing(
             PairStartRequest(
                 deviceId = deviceId,
                 deviceName = deviceName,
-                platform = "android",
+                // The real platform, so a PC's device list shows a TV as a TV
+                // rather than as a phone.
+                platform = app.platform,
                 protocolVersion = SENDRO_PROTOCOL_VERSION,
             ),
         )
@@ -596,7 +598,7 @@ private suspend fun runPairing(
                 deviceId = deviceId,
                 proof = proof,
                 deviceName = deviceName,
-                platform = "android",
+                platform = app.platform,
             ),
         )
     } catch (e: com.sendro.android.core.SendroHttpException) {
@@ -791,6 +793,7 @@ private suspend fun confirmLink(app: SendroApplication, link: PairLink): PairSta
         link = link,
         clientDeviceId = app.settings.clientDeviceId,
         deviceName = app.settings.current.deviceName,
+        platform = app.platform,
     )
     app.tokens.save(response.host.deviceId, response.deviceToken)
     app.pairedHosts.add(

@@ -5,12 +5,15 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  DiscoveredPeer,
   HistoryEntry,
   HostInfo,
   IncomingMessage,
   LinkOptions,
   LinkSession,
   NetIface,
+  PairedPeer,
+  PeerPairingSession,
   PreviewInfo,
   QrPairing,
   Settings,
@@ -57,6 +60,45 @@ export const resolveDetectedFile = (detectionId: string, send: boolean) =>
   invoke<void>("resolve_detected_file", { detectionId, send });
 
 export const openReceiveFolder = () => invoke<void>("open_receive_folder");
+
+/* -- Peers: devices this PC sends *to* (PROTOCOL.md §4/§7/§11.2/§15) --
+ *
+ * `trustedDevices` above is the other direction — devices that pair to this
+ * PC and pull from it. These two lists are separate on purpose; a device can
+ * appear in both.
+ */
+
+/** Live mDNS browse results. Also arrives unprompted as `peersChanged`. */
+export const discoveredPeers = () => invoke<DiscoveredPeer[]>("discovered_peers");
+
+/**
+ * Starts an outbound pairing (§4.1): checks the peer's /info, then asks it to
+ * open a session. The peer then shows a 6-digit code on its own screen.
+ * Works for a discovered peer and for a hand-typed address alike.
+ */
+export const pairWithPeer = (address: string, port: number) =>
+  invoke<PeerPairingSession>("pair_with_peer", { address, port });
+
+/** Finishes it (§4.2) with the digits the user read off the peer. */
+export const confirmPeerPairing = (pairingId: string, code: string) =>
+  invoke<PairedPeer>("confirm_peer_pairing", { pairingId, code });
+
+export const pairedPeers = () => invoke<PairedPeer[]>("paired_peers");
+export const forgetPeer = (deviceId: string) =>
+  invoke<boolean>("forget_peer", { deviceId });
+export const pingPeer = (deviceId: string) =>
+  invoke<boolean>("ping_peer", { deviceId });
+
+/** §7 push. Shows up in the normal queue/history as an outgoing transfer. */
+export const sendFilesToPeer = (deviceId: string, paths: string[]) =>
+  invoke<TransferSummary[]>("send_files_to_peer", { deviceId, paths });
+
+/** §11.2 — ephemeral text to a peer (a TV shows it as a card). */
+export const sendMessageToPeer = (deviceId: string, text: string) =>
+  invoke<void>("send_message_to_peer", { deviceId, text });
+
+/** Re-emit `peersChanged` (after an "Add by IP", where no record changed). */
+export const refreshPeers = () => invoke<void>("refresh_peers");
 
 /* -- Ephemeral text messages (PROTOCOL.md §11) — never persisted -- */
 

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sendro talks plain HTTP/1.1 to peers on the local network (PROTOCOL.md §3):
+  a LAN-only, TLS-free v1 by design. Android has blocked cleartext by default
+  since API 28, which is exactly what produced
+
+      CLEARTEXT communication to 192.168.1.103 not permitted by
+      network security policy
+
+  when the TV tried to pair with the PC.
+
+  A peer's address is whatever the router handed out, so it cannot be
+  enumerated ahead of time — and <domain> matches host names / exact IP
+  literals only: **CIDR ranges are not supported** by the platform
+  (developer.android.com/privacy-and-security/security-config). So cleartext
+  is permitted in base-config, and the one place Sendro ever leaves the LAN —
+  the GitHub update check (docs/UPDATES.md) — is pinned back to HTTPS-only
+  with domain-config, which overrides the base for those hosts.
+-->
+<network-security-config>
+
+    <!-- LAN peers: any private address the router may have assigned. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- The update channel must never fall back to cleartext. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubusercontent.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+</network-security-config>

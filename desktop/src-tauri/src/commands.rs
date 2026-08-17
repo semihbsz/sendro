@@ -11,8 +11,9 @@ use tauri_plugin_opener::OpenerExt as _;
 use uuid::Uuid;
 
 use sendro_core::{
-    HistoryEntry, HostInfo, IncomingMessage, LinkOptions, LinkSession, NetIface, QrPairing,
-    Settings, TransferSummary, TrustedDevice, WatchFolderConfig,
+    DiscoveredPeer, HistoryEntry, HostInfo, IncomingMessage, LinkOptions, LinkSession, NetIface,
+    PairedPeer, PeerPairingSession, QrPairing, Settings, TransferSummary, TrustedDevice,
+    WatchFolderConfig,
 };
 
 use crate::{show_main_window, tray::TrayState, AppState};
@@ -140,6 +141,107 @@ pub fn remove_watch_folder(state: State<'_, AppState>, id: Uuid) -> bool {
 #[tauri::command]
 pub fn resolve_detected_file(state: State<'_, AppState>, detection_id: Uuid, send: bool) {
     state.core.resolve_detected_file(detection_id, send);
+}
+
+// ---------------------------------------------------------------------------
+// Peers — this PC as a *client* (PROTOCOL.md §4/§7/§11.2/§15).
+//
+// Mirror image of the block above: `trusted_devices` are devices that pair to
+// this PC and pull from it; `paired_peers` are devices this PC pairs to and
+// pushes to. A device can be in both lists.
+//
+// `CoreEvent::PeersChanged` needs no wiring here — every CoreEvent is already
+// forwarded to the webview as `"core-event"` in lib.rs.
+// ---------------------------------------------------------------------------
+
+/// Peers currently visible on the LAN (live mDNS browse).
+#[tauri::command]
+pub fn discovered_peers(state: State<'_, AppState>) -> Vec<DiscoveredPeer> {
+    state.core.discovered_peers()
+}
+
+/// §4 step 1 as the client. Also the "Add by IP" path — nothing about it
+/// requires the peer to have been discovered.
+#[tauri::command]
+pub async fn pair_with_peer(
+    state: State<'_, AppState>,
+    address: String,
+    port: u16,
+) -> Result<PeerPairingSession, String> {
+    state
+        .core
+        .pair_with_peer(address, port)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// §4 step 2: the 6 digits the user read off the peer's screen.
+#[tauri::command]
+pub async fn confirm_peer_pairing(
+    state: State<'_, AppState>,
+    pairing_id: String,
+    code: String,
+) -> Result<PairedPeer, String> {
+    state
+        .core
+        .confirm_peer_pairing(pairing_id, code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn paired_peers(state: State<'_, AppState>) -> Vec<PairedPeer> {
+    state.core.paired_peers()
+}
+
+#[tauri::command]
+pub fn forget_peer(state: State<'_, AppState>, device_id: Uuid) -> bool {
+    state.core.forget_peer(device_id)
+}
+
+#[tauri::command]
+pub async fn ping_peer(state: State<'_, AppState>, device_id: Uuid) -> Result<bool, String> {
+    Ok(state.core.ping_peer(device_id).await)
+}
+
+/// §7 push. Lands in the same queue/history as everything else, so the Flow
+/// tab shows progress/speed/ETA/cancel with no special casing.
+#[tauri::command]
+pub async fn send_files_to_peer(
+    state: State<'_, AppState>,
+    device_id: Uuid,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<TransferSummary>, String> {
+    // Same rule as `offer_files`: the user picked these, so they may be
+    // previewed. The guard is taken and dropped inside — never held across
+    // the await.
+    state.remember_previewable(paths.iter().cloned());
+    state
+        .core
+        .send_files_to_peer(device_id, paths)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// §11.2 as the client — text to a TV or phone. RAM only on both sides.
+#[tauri::command]
+pub async fn send_message_to_peer(
+    state: State<'_, AppState>,
+    device_id: Uuid,
+    text: String,
+) -> Result<(), String> {
+    state
+        .core
+        .send_message_to_peer(device_id, text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Re-emit `PeersChanged` (used after an "Add by IP" pairing, where no mDNS
+/// record changed but the list did).
+#[tauri::command]
+pub fn refresh_peers(state: State<'_, AppState>) {
+    state.core.refresh_peers();
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
 import { IconDrop, IconSend, IconShieldCheck } from "../icons";
-import { formatBytes, isOnline } from "../format";
+import { formatBytes } from "../format";
+import { sendTargets } from "../targets";
 import { TransferCard } from "../components/TransferCard";
 import { LinkPanel } from "../components/LinkPanel";
 import { readClipboardForSend } from "../paste";
@@ -33,7 +34,7 @@ function isEditable(target: EventTarget | null): boolean {
 }
 
 export function Send() {
-  const { devices, queue, history, dragging, pendingPaths, composerText } =
+  const { devices, peers, queue, history, dragging, pendingPaths, composerText } =
     useAppState();
   const dispatch = useAppDispatch();
   const [pasteHint, setPasteHint] = useState<string | null>(null);
@@ -104,19 +105,21 @@ export function Send() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [paste, composerText, pendingPaths]);
 
-  const onlineDevices = devices.filter((d) => isOnline(d.lastSeenMs));
+  // Both directions of trust are somewhere to drop a file (§15).
+  const targets = sendTargets(devices, peers);
+  const onlineTargets = targets.filter((t) => t.online);
   const active = queue.filter((t) => !isTerminal(t.state));
 
   const heroSub = dragging
     ? "Release to send"
-    : devices.length === 0
-      ? "Pair your iPhone first — open Sendro on it and tap this PC"
-      : onlineDevices.length > 0
+    : targets.length === 0
+      ? "Pair a device first — Settings › Devices, either direction"
+      : onlineTargets.length > 0
         ? `${
-            onlineDevices.length === 1
-              ? (onlineDevices[0]?.deviceName ?? "1 device")
-              : `${onlineDevices.length} devices`
-          } ${onlineDevices.length === 1 ? "is" : "are"} online · drop anywhere in this window`
+            onlineTargets.length === 1
+              ? (onlineTargets[0]?.deviceName ?? "1 device")
+              : `${onlineTargets.length} devices`
+          } ${onlineTargets.length === 1 ? "is" : "are"} online · drop anywhere in this window`
         : "Paired devices pick transfers up when they come online";
 
   // Aside stats: bytes completed today + verified share of completed sends.

@@ -17,10 +17,12 @@ import {
   MAX_MESSAGE_CARDS,
   type CoreEvent,
   type Detection,
+  type DiscoveredPeer,
   type HistoryEntry,
   type HostInfo,
   type IncomingMessage,
   type LinkSession,
+  type PairedPeer,
   type PairingSession,
   type PreviewTarget,
   type QrPairing,
@@ -53,7 +55,14 @@ export interface AppState {
   view: View;
   info: HostInfo | null;
   settings: Settings | null;
+  /** Devices that pair *to* this PC and pull from it (host direction). */
   devices: TrustedDevice[];
+  /** Devices this PC pairs *to* and pushes to (client direction, §15). */
+  peers: PairedPeer[];
+  /** Everything advertising `_sendro._tcp` on the LAN right now (§2). */
+  discovered: DiscoveredPeer[];
+  /** True while the first browse round has not produced anything yet. */
+  browsing: boolean;
   queue: TransferSummary[];
   history: HistoryEntry[];
   watchFolders: WatchFolderConfig[];
@@ -75,6 +84,8 @@ export interface AppState {
   messages: IncomingMessage[];
   /** Text waiting in the composer, or null when it is closed. */
   composerText: string | null;
+  /** Device/peer the composer should open on, when it was opened from a row. */
+  composerTarget: string | null;
   /**
    * The QR payload for the pairing session currently on screen (§13). Only
    * set while it belongs to `pairing` — a new typed session clears it.
@@ -99,6 +110,9 @@ const initialState: AppState = {
   info: null,
   settings: null,
   devices: [],
+  peers: [],
+  discovered: [],
+  browsing: true,
   queue: [],
   history: [],
   watchFolders: [],
@@ -111,6 +125,7 @@ const initialState: AppState = {
   chipDeviceId: null,
   messages: [],
   composerText: null,
+  composerTarget: null,
   qrPairing: null,
   link: null,
   linkArmed: false,
@@ -135,6 +150,9 @@ export type Action =
   | { type: "set-paused"; paused: boolean }
   | { type: "set-settings"; settings: Settings }
   | { type: "set-devices"; devices: TrustedDevice[] }
+  | { type: "set-peers"; peers: PairedPeer[] }
+  | { type: "set-discovered"; discovered: DiscoveredPeer[] }
+  | { type: "set-browsing"; browsing: boolean }
   | { type: "set-queue"; queue: TransferSummary[] }
   | { type: "set-history"; history: HistoryEntry[] }
   | { type: "set-watch-folders"; folders: WatchFolderConfig[] }
@@ -142,7 +160,7 @@ export type Action =
   | { type: "set-chip-device"; deviceId: string | null }
   | { type: "set-messages"; messages: IncomingMessage[] }
   | { type: "dismiss-message"; messageId: string }
-  | { type: "open-composer"; text: string }
+  | { type: "open-composer"; text: string; targetId?: string }
   | { type: "close-composer" }
   | { type: "dismiss-pairing" }
   | { type: "set-qr-pairing"; qr: QrPairing | null }
@@ -260,6 +278,9 @@ function applyCoreEvent(state: AppState, ev: CoreEvent): AppState {
       // The core is authoritative: a session that expired on its own comes
       // through here as `null`, which collapses the panel back to composing.
       return { ...state, link: ev.session };
+    case "peersChanged":
+      // The core debounces these (~500 ms), so this is already coalesced.
+      return { ...state, discovered: ev.peers, browsing: false };
     case "guestUpload":
       // The counter itself rides on `linkSessionChanged`; the upload also
       // shows up in the queue as "Guest (link)". Nothing to fold in here.
@@ -298,6 +319,19 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, settings: action.settings };
     case "set-devices":
       return { ...state, devices: action.devices };
+    case "set-peers":
+      return { ...state, peers: action.peers };
+    case "set-discovered":
+      return {
+        ...state,
+        discovered: action.discovered,
+        // An empty snapshot is not evidence that the browse finished — mDNS
+        // answers take a moment. Only a result (or the timeout below) stops
+        // the spinner.
+        browsing: action.discovered.length > 0 ? false : state.browsing,
+      };
+    case "set-browsing":
+      return { ...state, browsing: action.browsing };
     case "set-queue":
       return { ...state, queue: action.queue };
     case "set-history":
@@ -323,9 +357,13 @@ function reducer(state: AppState, action: Action): AppState {
         ),
       };
     case "open-composer":
-      return { ...state, composerText: action.text };
+      return {
+        ...state,
+        composerText: action.text,
+        composerTarget: action.targetId ?? null,
+      };
     case "close-composer":
-      return { ...state, composerText: null };
+      return { ...state, composerText: null, composerTarget: null };
     case "dismiss-pairing":
       return { ...state, pairing: null, qrPairing: null };
     case "set-qr-pairing":
@@ -370,8 +408,18 @@ export function useAppDispatch(): Dispatch<Action> {
 }
 
 async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
-  const [info, settings, devices, queue, history, folders, messages, link] =
-    await Promise.all([
+  const [
+    info,
+    settings,
+    devices,
+    queue,
+    history,
+    folders,
+    messages,
+    link,
+    peers,
+    discovered,
+  ] = await Promise.all([
       api.getInfo(),
       api.getSettings(),
       api.trustedDevices(),
@@ -384,6 +432,10 @@ async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
       // A webview reload must not lose sight of a running guest session —
       // the core still holds it (only an app restart kills it).
       api.linkSession(),
+      // The other direction of trust, and whatever the live browser has
+      // already found (it keeps running whether or not anyone is looking).
+      api.pairedPeers(),
+      api.discoveredPeers(),
     ]);
   dispatch({
     type: "snapshots",
@@ -396,6 +448,8 @@ async function loadSnapshots(dispatch: Dispatch<Action>): Promise<void> {
   });
   dispatch({ type: "set-messages", messages: messages.slice().reverse() });
   dispatch({ type: "set-link", link });
+  dispatch({ type: "set-peers", peers });
+  dispatch({ type: "set-discovered", discovered });
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -431,6 +485,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       else unlisteners.push(un);
     });
 
+    // mDNS is continuous, but the *first* round is worth a spinner. Give it a
+    // few seconds, then settle into "nothing found yet".
+    const browseTimer = window.setTimeout(() => {
+      dispatch({ type: "set-browsing", browsing: false });
+    }, 4000);
+    unlisteners.push(() => window.clearTimeout(browseTimer));
+
     // Presence: the iPhone long-polls the core every ~25 s, which bumps its
     // lastSeenMs — but only in the core's memory. Re-fetch the trusted list
     // every 10 s so the online indicator tracks reality instead of the
@@ -439,6 +500,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       api
         .trustedDevices()
         .then((devices) => dispatch({ type: "set-devices", devices }))
+        .catch(() => undefined);
+      // Peers have no long poll to bump their lastSeen — the core refreshes
+      // it on ping/upload — so this keeps the paired list honest, and picks
+      // up a browse result if a `peersChanged` event was ever missed.
+      api
+        .pairedPeers()
+        .then((peers) => dispatch({ type: "set-peers", peers }))
+        .catch(() => undefined);
+      api
+        .discoveredPeers()
+        .then((discovered) => dispatch({ type: "set-discovered", discovered }))
         .catch(() => undefined);
     }, 10_000);
     unlisteners.push(() => window.clearInterval(presenceTimer));

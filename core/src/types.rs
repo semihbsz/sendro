@@ -79,6 +79,10 @@ pub struct TransferSummary {
     pub device_name: String,
     /// "outgoing" | "incoming"
     pub direction: String,
+    /// True when this is a §7 push *from* this PC to a peer host, rather than
+    /// an offer a client pulls. Retrying one restarts from byte 0 (§7 has no
+    /// ranged upload), so the UI has to tell them apart.
+    pub is_peer: bool,
     pub bytes_transferred: u64,
     pub speed_bps: u64,
     pub eta_seconds: Option<u64>,
@@ -291,6 +295,33 @@ pub struct ErrorBody {
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// A peer seen on the LAN by the continuously-running mDNS browser (§2).
+///
+/// This is what the PC's "On this network" list renders. `paired` and
+/// `reachable` are *local* judgements, not part of the advertisement:
+/// `paired` means we already hold a token for it (outbound peer) or it is in
+/// our trusted list (inbound device); `reachable` means the last
+/// `GET /api/v1/info` probe against `address:port` answered.
+///
+/// Per §15.1 `platform` is informational only — capability is decided by
+/// `/api/v1/info` plus a `404` on the outbox, never by the TXT record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredPeer {
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub platform: String,
+    pub address: String,
+    pub port: u16,
+    pub protocol_version: u32,
+    pub last_seen_ms: i64,
+    /// Already in the trusted list (it pairs *to* us) or in `peers.json`
+    /// (we pair *to* it).
+    pub paired: bool,
+    /// The last `/api/v1/info` probe succeeded.
+    pub reachable: bool,
 }
 
 /// A host discovered on the LAN via mDNS browse (future desktop features).

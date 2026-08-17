@@ -127,6 +127,8 @@ object PairLinkFlow {
         link: PairLink,
         clientDeviceId: String,
         deviceName: String,
+        /** This device's §5 platform string — `android` or `androidtv`. */
+        platform: String,
     ): PairConfirmResponse {
         val client = SendroClient.create(link.host, link.port)
             ?: throw PairLinkException(PairLinkError.BadAddress)
@@ -164,7 +166,7 @@ object PairLinkFlow {
             deviceId = clientDeviceId,
             proof = proof,
             deviceName = deviceName,
-            platform = "android",
+            platform = platform,
         )
 
         try {

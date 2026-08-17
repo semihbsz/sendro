@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::link::LinkSession;
-use crate::types::{TransferSummary, TrustedDevice};
+use crate::types::{DiscoveredPeer, TransferSummary, TrustedDevice};
 
 /// Broadcast channel capacity for [`CoreEvent`]s.
 pub const EVENT_CHANNEL_CAPACITY: usize = 512;
@@ -57,6 +57,12 @@ pub enum CoreEvent {
         file_name: String,
         size_bytes: u64,
     },
+    /// The set of peers on the LAN changed (§2 browse): one appeared,
+    /// disappeared, moved address, or its reachability/pairing state changed.
+    /// Debounced by [`crate::discovery::PEERS_DEBOUNCE`] so a burst of mDNS
+    /// records is one event, not twenty.
+    #[serde(rename_all = "camelCase")]
+    PeersChanged { peers: Vec<DiscoveredPeer> },
     #[serde(rename_all = "camelCase")]
     ServerStarted { port: u16 },
 }

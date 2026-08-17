@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../store";
 import * as api from "../api";
-import { formatDate, formatRelative, isOnline } from "../format";
-import { IconPhone, IconWifi } from "../icons";
+import { formatRelative } from "../format";
 import { Toggle } from "../components/common";
 import { ConnectionCard } from "../components/ConnectionCard";
+import { DevicesPanel } from "../components/DevicesPanel";
 import { usePrefs } from "../prefs";
 import { useUpdates } from "../updates";
 import {
@@ -15,116 +15,6 @@ import {
   NOTIFY_CATEGORIES,
 } from "../notify";
 import type { Settings } from "../types";
-
-/** Trusted devices — folded into Settings in the new IA (the rail has no
- *  Devices tab; the gear is where trust is managed). */
-function DevicesSection() {
-  const { devices } = useAppState();
-  const dispatch = useAppDispatch();
-  const [pairError, setPairError] = useState<string | null>(null);
-
-  /** §13: opens a real pairing session and shows it as a QR in the modal. */
-  const showQr = async () => {
-    setPairError(null);
-    try {
-      const qr = await api.startQrPairing();
-      dispatch({ type: "set-qr-pairing", qr });
-    } catch (err) {
-      setPairError(String(err));
-    }
-  };
-
-  const revoke = async (deviceId: string) => {
-    try {
-      await api.revokeDevice(deviceId);
-      const next = await api.trustedDevices();
-      dispatch({ type: "set-devices", devices: next });
-    } catch (err) {
-      console.error("revoke failed", err);
-    }
-  };
-
-  return (
-    <div className="settings-section">
-      <div className="settings-section-head">
-        <span className="strip-label">Devices</span>
-        <span className="finished-head-spacer" />
-        <button className="btn-glass btn-sm" onClick={() => void showQr()}>
-          Pair with a QR code
-        </button>
-      </div>
-      {pairError ? <div className="error-note">{pairError}</div> : null}
-      <div className="settings-panel">
-        {devices.length === 0 ? (
-          <div className="device-row">
-            <div className="device-row-icon">
-              <IconPhone size={17} />
-            </div>
-            <div className="device-row-main">
-              <div className="device-row-name">No devices paired yet</div>
-              <div className="device-row-sub">
-                pair below — the 6-digit code appears on this screen
-              </div>
-            </div>
-          </div>
-        ) : (
-          devices.map((d) => {
-            const online = isOnline(d.lastSeenMs);
-            return (
-              <div className="device-row" key={d.deviceId}>
-                <div className="device-row-icon">
-                  <IconPhone size={17} />
-                </div>
-                <div className="device-row-main">
-                  <div className="device-row-name">{d.deviceName}</div>
-                  <div className="device-row-sub">
-                    {d.platform === "ios" ? "iOS" : d.platform} · paired{" "}
-                    {formatDate(d.pairedAtMs)} ·{" "}
-                    {online
-                      ? "online now"
-                      : `last seen ${formatRelative(d.lastSeenMs)}`}
-                  </div>
-                </div>
-                <span className={`online-pill${online ? "" : " off"}`}>
-                  <span
-                    className={`pulse-dot${online ? "" : " off"}`}
-                    style={{ width: 6, height: 6 }}
-                  />
-                  {online ? "online" : "offline"}
-                </span>
-                <button
-                  className="btn-revoke"
-                  onClick={() => void revoke(d.deviceId)}
-                  title="Revoke trust — this device will need to pair again"
-                >
-                  Revoke
-                </button>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      <div className="pair-hint">
-        <IconWifi size={17} />
-        <div>
-          <div className="pair-hint-title">How to pair</div>
-          <div className="pair-hint-body">
-            Make sure both devices are on the same Wi-Fi network, then:
-            <ol>
-              <li>Open Sendro on your iPhone.</li>
-              <li>Tap this PC when it appears under nearby devices.</li>
-              <li>Type the 6-digit code that pops up on this screen.</li>
-            </ol>
-            Or skip all that: hit “Pair with a QR code” and point the iPhone's
-            camera at the screen. Same session, same 2-minute expiry — the
-            code only ever travels from your screen to your camera.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** Windows toast notifications — per-category, remembered on this PC. */
 function NotificationsSection() {
@@ -372,7 +262,7 @@ export function SettingsView() {
 
       {error ? <div className="error-note">{error}</div> : null}
 
-      <DevicesSection />
+      <DevicesPanel />
 
       <ConnectionCard />
 

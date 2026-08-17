@@ -50,7 +50,18 @@ data class InfoResponse(
 data class PairStartRequest(
     val deviceId: String,
     val deviceName: String,
-    val platform: String = "android",
+    /**
+     * `windows` | `ios` | `android` | `androidtv`.
+     *
+     * NO DEFAULT VALUE that names a platform. This class is used in both
+     * directions: this app ENCODES it when pairing to a PC, and — since §15 —
+     * DECODES it when a PC pairs to this device. A default of "android" would
+     * silently label a Windows peer that omitted the field as an Android one,
+     * which is exactly the wrong answer in the case that matters. Blank means
+     * "the peer did not say", and the UI shows it as unknown rather than
+     * inventing a device type.
+     */
+    val platform: String = "",
     val protocolVersion: Int = SENDRO_PROTOCOL_VERSION,
 )
 
@@ -78,7 +89,12 @@ data class PairConfirmRequest(
     /** base64url(HMAC-SHA256), no padding. */
     val proof: String,
     val deviceName: String? = null,
-    val platform: String? = "android",
+    /**
+     * Null, not "android" — see [PairStartRequest.platform]. Senders in this
+     * app always pass it explicitly; a null here means a remote client left it
+     * out, and the host falls back to whatever `pair/start` told it.
+     */
+    val platform: String? = null,
 )
 
 @Serializable

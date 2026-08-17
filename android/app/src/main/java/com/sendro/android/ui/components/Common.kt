@@ -375,6 +375,50 @@ fun NoticeCard(
 }
 
 /**
+ * How Sendro names another device's kind, in one place.
+ *
+ * §15 made this matter: a receiver host is paired to by phones AND by the
+ * Windows app, so anything that said "phone" by assumption is now wrong half
+ * the time. `platform` is the §5 / §2-TXT string and is informational only —
+ * it decides wording, never capability.
+ */
+object PlatformNames {
+
+    /** Short chip label: "PC", "phone", "TV", "iPhone". */
+    fun label(platform: String?): String = when (platform?.trim()?.lowercase()) {
+        "windows" -> "PC"
+        "androidtv" -> "TV"
+        "android" -> "phone"
+        "ios" -> "iPhone"
+        "macos", "darwin" -> "Mac"
+        "linux" -> "Linux PC"
+        null, "" -> "device"
+        else -> platform.trim()
+    }
+
+    /** Sentence noun: "your computer", "a phone", "this TV". */
+    fun noun(platform: String?): String = when (platform?.trim()?.lowercase()) {
+        "windows", "macos", "darwin", "linux" -> "computer"
+        "androidtv" -> "TV"
+        "android" -> "phone"
+        "ios" -> "iPhone"
+        else -> "device"
+    }
+
+    /**
+     * The glyph on a device row. Deliberately typographic rather than an icon
+     * set: it costs nothing, scales with the TV type scale, and never needs a
+     * new vector when a platform is added.
+     */
+    fun glyph(platform: String?): String = when (platform?.trim()?.lowercase()) {
+        "windows", "macos", "darwin", "linux" -> "▭"
+        "androidtv" -> "▬"
+        "ios", "android" -> "▯"
+        else -> "•"
+    }
+}
+
+/**
  * Vertical clearance at the top of every screen.
  *
  * On a phone that is the status bar; on a TV there is no status bar but there

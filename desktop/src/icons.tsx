@@ -66,6 +66,40 @@ export const IconPhone = (p: IconProps) => (
   </Svg>
 );
 
+/** A television — an Android TV peer (§15). */
+export const IconTv = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2.5" y="6" width="19" height="12.5" rx="2.5" />
+    <path d="m8.5 2.5 3.5 3.5 3.5-3.5" />
+    <path d="M9 21.5h6" />
+  </Svg>
+);
+
+/** A desktop monitor — another PC on the network. */
+export const IconMonitor = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2.5" y="4" width="19" height="13" rx="2.5" />
+    <path d="M9 20.5h6M12 17.5v3" />
+  </Svg>
+);
+
+/** A device of unknown kind — everything the TXT record does not name. */
+export const IconDevice = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="5" width="18" height="14" rx="3" />
+    <path d="M7.5 12h9" />
+  </Svg>
+);
+
+/** Concentric search sweep — "looking for devices". */
+export const IconRadar = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="12" cy="12" r="4.5" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+  </Svg>
+);
+
 export const IconPlus = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 5v14M5 12h14" />

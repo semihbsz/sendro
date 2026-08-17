@@ -171,6 +171,7 @@ fun RootScreen(
                         onOpenFlight = { overlay = Overlay.Flight(it) },
                         onPreview = { overlay = Overlay.Preview(it) },
                         onGoLibrary = { tab = SendroTab.LIBRARY },
+                        onOpenReceiverPairing = { overlay = Overlay.ReceiverPairing },
                     )
 
                     SendroTab.SEND -> SendScreen(

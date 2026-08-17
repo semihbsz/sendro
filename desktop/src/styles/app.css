@@ -3371,3 +3371,131 @@ select.input option {
 .update-status.bad {
   color: var(--danger-strong);
 }
+
+/* ---------- Peers: the other direction of trust (PROTOCOL.md §15) ---------- */
+
+/* One line under a section heading saying, without jargon, which way the
+   files move. */
+.section-explainer {
+  margin: -4px 0 10px;
+  font: 400 12.5px/1.5 var(--font-ui);
+  color: var(--text-tertiary);
+  max-width: 68ch;
+}
+
+/* Pill on a discovered-device row: Paired / Unreachable. The Pair *button*
+   uses .btn-solid (iris), so the three states read as
+   settled / actionable / out of reach. */
+.state-chip {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--verify-dim);
+  border: 0.5px solid rgba(55, 230, 196, 0.25);
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--verify);
+  white-space: nowrap;
+}
+
+.state-chip.off {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border);
+  color: var(--text-tertiary);
+}
+
+/* Browsing indicator — a quiet ring, not a progress bar: mDNS never
+   "finishes", it just keeps listening. */
+.scan-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-border);
+  border-top-color: var(--accent-bright);
+  animation: scan-spin 780ms linear infinite;
+}
+
+@keyframes scan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* "Add by IP" sits inside the network panel, below the found devices. */
+.settings-row.manual-add {
+  border-top: var(--hairline);
+}
+
+/* Per-row failure (a peer that stopped answering) — inline, not a modal. */
+.row-error {
+  margin-top: 5px;
+  font: 400 11.5px/1.4 var(--font-ui);
+  color: var(--danger-strong);
+}
+
+/* Device rows in the peer list carry more buttons than the trusted ones. */
+.device-row .btn-glass.btn-sm,
+.device-row .btn-ghost-text {
+  flex: none;
+}
+
+/* ---------- Outbound pairing dialog (§4 as the client) ---------- */
+
+.peer-pair-head {
+  text-align: center;
+}
+
+.peer-pair-name {
+  font: 600 16px/1.3 var(--font-ui);
+  color: var(--text-bright);
+}
+
+.peer-pair-sub {
+  margin-top: 4px;
+  font: 400 11.5px/1.4 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.peer-pair-copy {
+  margin: 14px 0 12px;
+  text-align: center;
+  font: 400 13px/1.6 var(--font-ui);
+  color: var(--text-secondary);
+}
+
+.peer-code-input {
+  width: 100%;
+  text-align: center;
+  font: 600 30px/1 var(--font-mono);
+  letter-spacing: 0.32em;
+  /* The letter-spacing pushes the visual centre right by half a gap. */
+  text-indent: 0.32em;
+  padding: 16px 12px;
+}
+
+.peer-pair-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.peer-pair-timer {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-tertiary);
+}
+
+/* Platform glyph in the send picker, between the presence dot and the name. */
+.picker-device-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  flex: none;
+}

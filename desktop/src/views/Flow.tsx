@@ -16,7 +16,8 @@ import {
 } from "../icons";
 import { EmptyState, FileName } from "../components/common";
 import { targetForHistory, targetForTransfer } from "../preview";
-import { TransferCard, CANCELABLE, RETRYABLE } from "../components/TransferCard";
+import { TransferCard, CANCELABLE } from "../components/TransferCard";
+import { canRetry, retrySend } from "../targets";
 import { PhasePill, ProgressRing, Sparkline, ringFraction } from "../components/transfer";
 import { isTerminal, type HistoryEntry, type TransferSummary } from "../types";
 
@@ -145,10 +146,9 @@ export function Flow() {
     (t) => t.state !== "completed",
   );
   // Interrupted transfers stay in `active`, so scan the whole queue for
-  // anything the per-item Retry button would accept.
-  const retryable = queue.filter(
-    (t) => t.direction === "outgoing" && RETRYABLE.has(t.state),
-  );
+  // anything the per-item Retry button would accept — offers to re-publish
+  // and peer pushes to send again from byte 0 alike.
+  const retryable = queue.filter(canRetry);
 
   // Hero: prefer the transfer that's actually moving.
   const hero =
@@ -189,9 +189,7 @@ export function Flow() {
     if (retryable.length === 0) return;
     setRetryingAll(true);
     try {
-      const failures = await mapLimited(retryable, 4, (t) =>
-        api.retryTransfer(t.transferId),
-      );
+      const failures = await mapLimited(retryable, 4, (t) => retrySend(t));
       if (failures.length > 0) {
         console.error(`${failures.length} transfers could not be retried`);
       }

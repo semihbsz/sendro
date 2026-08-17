@@ -26,6 +26,9 @@ base64 = "0.22"
 hex = "0.4"
 mdns-sd = "0.13"
 if-addrs = "0.13"
+# The *client* half of the protocol (§4/§7/§11.2 against a peer host). Plain
+# HTTP on the LAN — no TLS features, deliberately: PROTOCOL.md §3.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 walkdir = "2"
 mime_guess = "2"
 percent-encoding = "2"

@@ -34,11 +34,13 @@ import com.sendro.android.ui.components.AccentPill
 import com.sendro.android.ui.components.CodeBoxes
 import com.sendro.android.ui.components.GhostPill
 import com.sendro.android.ui.components.NoticeCard
+import com.sendro.android.ui.components.PlatformNames
 import com.sendro.android.ui.components.QrCode
 import com.sendro.android.ui.components.RequestInitialFocus
 import com.sendro.android.ui.components.SectionTag
 import com.sendro.android.ui.theme.LocalDeviceProfile
 import com.sendro.android.ui.theme.Sendro
+import com.sendro.android.ui.theme.glassCard
 import com.sendro.android.ui.theme.glassRow
 import kotlinx.coroutines.delay
 
@@ -133,6 +135,15 @@ fun ReceiverPairingScreen(app: SendroApplication, onClose: () -> Unit) {
             )
         }
 
+        // A remote pair/start means someone is standing at another device
+        // waiting to type six digits — most often the Windows app, which has
+        // no camera and cannot use the QR at all. That request gets the top of
+        // the screen and the biggest type on it, because the whole interaction
+        // is "read this number across the room".
+        typedSession?.let { session ->
+            IncomingPairRequest(session = session, nowMs = nowMs)
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(28.dp),
@@ -225,22 +236,13 @@ fun ReceiverPairingScreen(app: SendroApplication, onClose: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().glassRow().padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    SectionTag(
-                        if (typedSession != null) "Type this on your computer" else "Or type this code",
-                        if (typedSession != null) Sendro.irisSoft else Sendro.textFaint,
-                    )
-                    val shown = typedSession ?: qrSession
-                    CodeBoxes(shown?.code.orEmpty())
+                    SectionTag("Or type this code", Sendro.textFaint)
+                    CodeBoxes(qrSession?.code.orEmpty())
                     Text(
-                        text = when {
-                            typedSession != null ->
-                                "${typedSession.peerName ?: "A computer"} is waiting — " +
-                                    "${typedSession.secondsLeft(nowMs)}s left."
-                            else ->
-                                "On the PC: Sendro ▸ Send to a device ▸ enter " +
-                                    "${running.addresses.firstOrNull() ?: "this device's address"} " +
-                                    "and this code."
-                        },
+                        text = "For a sender with no camera. On the PC: Sendro ▸ find this " +
+                            "device ▸ Pair, then enter " +
+                            "${running.addresses.firstOrNull() ?: "this device's address"} " +
+                            "and the code it asks for.",
                         style = Sendro.sans(12.5f),
                         color = Sendro.textTertiary,
                     )
@@ -278,6 +280,11 @@ fun ReceiverPairingScreen(app: SendroApplication, onClose: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
+                    Text(
+                        text = PlatformNames.glyph(peer.platform),
+                        style = Sendro.mono(16f),
+                        color = Sendro.textTertiary,
+                    )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             peer.name,
@@ -285,7 +292,9 @@ fun ReceiverPairingScreen(app: SendroApplication, onClose: () -> Unit) {
                             color = Sendro.textPrimary,
                         )
                         Text(
-                            peer.platform,
+                            // "PC" / "phone" / "TV", never the raw protocol
+                            // string and never an assumption.
+                            text = PlatformNames.label(peer.platform),
                             style = Sendro.mono(10.5f),
                             color = Sendro.textTertiary,
                         )
@@ -302,6 +311,58 @@ fun ReceiverPairingScreen(app: SendroApplication, onClose: () -> Unit) {
             style = Sendro.sans(12.5f),
             color = Sendro.textTertiary,
             modifier = Modifier.padding(bottom = 24.dp),
+        )
+    }
+}
+
+/**
+ * The "someone is pairing to this device" banner.
+ *
+ * Deliberately not the shared [CodeBoxes]: those are sized for a person
+ * holding the device. This is sized for a person looking at a television from
+ * a sofa, so the digits are set at roughly twice the body scale and spaced.
+ */
+@Composable
+internal fun IncomingPairRequest(session: HostPairing.Session, nowMs: Long) {
+    val profile = LocalDeviceProfile.current
+    val remaining = session.secondsLeft(nowMs)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassCard(cornerRadius = 24.dp)
+            .padding(if (profile.isTv) 26.dp else 18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionTag(
+            "${PlatformNames.label(session.peerPlatform)} wants to pair",
+            Sendro.irisSoft,
+        )
+        Text(
+            text = session.peerName ?: "A ${PlatformNames.noun(session.peerPlatform)}",
+            style = Sendro.sans(if (profile.isTv) 26f else 20f, FontWeight.SemiBold),
+            color = Sendro.textPrimary,
+        )
+        Text(
+            text = "Type this code on that ${PlatformNames.noun(session.peerPlatform)}:",
+            style = Sendro.sans(14f),
+            color = Sendro.textSecondary,
+        )
+        Text(
+            // Spaced so the digits do not run together at a distance.
+            // chunked(1) rather than toCharArray(): unambiguous stdlib, and it
+            // yields Strings so joinToString needs no element formatter.
+            text = session.code.chunked(1).joinToString("  "),
+            style = Sendro.mono(if (profile.isTv) 46f else 30f, FontWeight.SemiBold, tracking = 2f),
+            color = Sendro.irisBright,
+        )
+        Text(
+            text = if (remaining > 0) {
+                "Expires in ${remaining}s"
+            } else {
+                "Expired — it will ask again."
+            },
+            style = Sendro.mono(12f),
+            color = if (remaining < 20) Sendro.warn else Sendro.textTertiary,
         )
     }
 }
