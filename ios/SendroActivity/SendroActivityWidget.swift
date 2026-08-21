@@ -96,6 +96,7 @@ struct SendroTransferLiveActivity: Widget {
 /// `dynamicIsland:` builder closure, so it never touches `self`.
 private func activityTint(for phase: SendroActivityPhase) -> Color {
     switch phase {
+    case .waiting:     return Theme.warn
     case .downloading: return Theme.iris
     case .verifying:   return Theme.teal
     case .saving:      return Theme.teal

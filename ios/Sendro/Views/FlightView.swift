@@ -3,9 +3,10 @@
 //  Sendro
 //
 //  Full-screen live transfer: progress ring with orbiting spark, phase rail
-//  (Prep / Stream / Verify / Save), throughput meter, and phase-specific
-//  actions — including verify, save-choice, photos-denied, failure and
-//  paused states. Backed 1:1 by TransferEngine's ActiveTransfer.
+//  (Queue / Prep / Stream / Verify / Save), throughput meter, and
+//  phase-specific actions — including queued, host-backpressure, verify,
+//  save-choice, photos-denied, failure and paused states. Backed 1:1 by
+//  TransferEngine's ActiveTransfer.
 //
 
 import SwiftUI
@@ -51,7 +52,7 @@ struct FlightView: View {
     private var ringFraction: Double {
         guard let transfer = liveTransfer else { return isDone ? 1 : 0 }
         switch transfer.phase {
-        case .preparing, .downloading, .interrupted, .failed:
+        case .queued, .waitingForHost, .preparing, .downloading, .interrupted, .failed:
             return transfer.fractionComplete
         case .verifying, .awaitingSaveChoice, .saving, .photosDenied:
             return 1
@@ -191,6 +192,10 @@ struct FlightView: View {
         if isDone { return "Verified" }
         guard let transfer = liveTransfer else { return "" }
         switch transfer.phase {
+        case .queued(let position):
+            return position <= 1 ? "Next in line" : "Waiting · #\(position) in line"
+        case .waitingForHost(let reason, _):
+            return reason.headline(hostName: flightRef.offer.senderName)
         case .preparing:          return "Preparing"
         case .downloading:        return "Receiving"
         case .verifying:          return "Verifying SHA-256"
@@ -250,6 +255,35 @@ struct FlightView: View {
             doneBadge(title: doneTitle)
         } else if let transfer = liveTransfer {
             switch transfer.phase {
+            case .queued(let position):
+                VStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundColor(Theme.irisSoft)
+                    Text(position <= 1 ? "NEXT UP" : "#\(position) IN LINE")
+                        .font(Theme.mono(11, .medium))
+                        .tracking(1.5)
+                        .foregroundColor(Theme.textBase.opacity(0.5))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            case .waitingForHost(let reason, let seconds):
+                VStack(spacing: 8) {
+                    Image(systemName: reason == .paused ? "pause.circle" : "hourglass")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundColor(Theme.warn)
+                    Text("\(seconds)s")
+                        .font(Theme.mono(22, .medium))
+                        .foregroundColor(Theme.textBase.opacity(0.72))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Text(reason.shortLabel.uppercased())
+                        .font(Theme.mono(10.5, .medium))
+                        .tracking(1.5)
+                        .foregroundColor(Theme.warn)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
             case .preparing, .downloading, .interrupted:
                 VStack(spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 2) {
@@ -375,14 +409,22 @@ struct FlightView: View {
 
     // MARK: Phase rail
 
+    /// QUEUE · PREP · STREAM · VERIFY · SAVE.
+    ///
+    /// The rail used to sit on STREAM for anything that was not verifying or
+    /// saving, which meant a queued or parked transfer claimed to be
+    /// streaming while nothing was moving. Waiting now has its own segment,
+    /// and a failure lands where it actually broke.
     private var railIndex: Int {
-        if isDone { return 3 }
+        if isDone { return 4 }
         guard let transfer = liveTransfer else { return 0 }
         switch transfer.phase {
-        case .preparing:                return 0
-        case .downloading, .interrupted, .failed: return 1
-        case .verifying:                return 2
-        case .awaitingSaveChoice, .saving, .photosDenied: return 3
+        case .queued, .waitingForHost:   return 0
+        case .preparing:                 return 1
+        case .downloading, .interrupted: return 2
+        case .failed:                    return transfer.bytesReceived > 0 ? 2 : 1
+        case .verifying:                 return 3
+        case .awaitingSaveChoice, .saving, .photosDenied: return 4
         }
     }
 
@@ -448,7 +490,21 @@ struct FlightView: View {
     @ViewBuilder
     private var statusBlock: some View {
         if let transfer = liveTransfer {
+            // A restart back to 0% is legitimate but looks like a bug
+            // without a word of explanation.
+            if let note = transfer.note, !transfer.phase.isWaiting {
+                infoCard(text: note, color: Theme.textSecondary)
+            }
             switch transfer.phase {
+            case .queued(let position):
+                infoCard(text: position <= 1
+                         ? "Next in line. Sendro receives \(TransferEngine.maxConcurrentDownloads) files at a time so each one lands at full speed — this starts the moment a slot frees."
+                         : "Number \(position) in line. Sendro receives \(TransferEngine.maxConcurrentDownloads) files at a time, so this starts as soon as the ones ahead of it finish.",
+                         color: Theme.textSecondary)
+            case .waitingForHost(let reason, let seconds):
+                infoCard(text: reason.waitingLine(hostName: flightRef.offer.senderName,
+                                                  seconds: seconds),
+                         color: Theme.warn)
             case .photosDenied:
                 infoCard(text: "Photos access is off, so this can't reach your gallery. Allow access in Settings, then retry — or keep it in Files.",
                          color: Theme.warn)
@@ -508,7 +564,7 @@ struct FlightView: View {
             }
         } else if let transfer = liveTransfer {
             switch transfer.phase {
-            case .preparing, .downloading, .verifying, .saving:
+            case .queued, .preparing, .downloading, .verifying, .saving:
                 Button {
                     engine.cancel(transferId: transfer.id)
                     dismiss()
@@ -518,6 +574,26 @@ struct FlightView: View {
                                    height: 50)
                 }
                 .buttonStyle(PressableButtonStyle())
+
+            case .waitingForHost:
+                HStack(spacing: 10) {
+                    Button {
+                        engine.resume(transferId: transfer.id)
+                    } label: {
+                        AccentPillLabel(title: "Try now", height: 50)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+
+                    Button {
+                        engine.cancel(transferId: transfer.id)
+                        dismiss()
+                    } label: {
+                        GhostPillLabel(title: "Cancel",
+                                       textColor: Theme.danger.opacity(0.9),
+                                       height: 50)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
 
             case .awaitingSaveChoice:
                 HStack(spacing: 10) {
@@ -632,16 +708,19 @@ struct VerifyArc: View {
 
 // MARK: - Phase rail
 
-/// Prep · Stream · Verify · Save with a sliding iris highlight.
+/// Queue · Prep · Stream · Verify · Save with a sliding iris highlight.
+///
+/// Queue is a first-class segment, not a gap: a transfer waiting for a slot
+/// or for the host has to be somewhere on this rail, and it is not streaming.
 struct PhaseRail: View {
 
     let index: Int
-    private let labels = ["Prep", "Stream", "Verify", "Save"]
+    private let labels = ["Queue", "Prep", "Stream", "Verify", "Save"]
 
     var body: some View {
         GeometryReader { geo in
             let innerWidth = geo.size.width - 10
-            let segment = innerWidth / 4
+            let segment = innerWidth / CGFloat(labels.count)
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.white.opacity(0.05))
@@ -661,6 +740,8 @@ struct PhaseRail: View {
                             .font(Theme.mono(10.5, .medium))
                             .tracking(0.8)
                             .foregroundColor(Color.white.opacity(0.85))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                             .frame(maxWidth: .infinity)
                     }
                 }

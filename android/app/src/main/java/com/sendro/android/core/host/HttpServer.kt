@@ -48,6 +48,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 class HttpServer(
     private val requestedPort: Int,
     private val portScanRange: Int,
+    /**
+     * Called once when the accept loop gives up on a socket that will not
+     * recover. The owner rebinds; without this the server used to die
+     * silently while the UI still said "Ready to receive".
+     */
+    private val onDied: () -> Unit = {},
     private val handler: (HttpRequest) -> HttpResponse,
 ) {
 
@@ -121,14 +127,41 @@ class HttpServer(
         runCatching { workers.shutdownNow() }
     }
 
+    /**
+     * Accept forever, surviving the transient failures a real device produces.
+     *
+     * The old loop broke out on the FIRST `IOException`, left [running] true,
+     * and therefore made the whole receiver permanently deaf while every
+     * status in the app still said it was listening — the exact silent hang
+     * this file must not have. `accept()` can fail transiently (EINTR, a
+     * momentary FD shortage, an interface flapping on a TV); those are worth
+     * a short sleep and another go. A closed socket, or a run of consecutive
+     * failures, is real: report it so the owner can rebind.
+     */
     private fun acceptLoop(socket: ServerSocket) {
+        var consecutiveFailures = 0
         while (running.get()) {
             val client = try {
                 socket.accept()
             } catch (e: IOException) {
-                if (running.get()) Log.w(TAG, "accept failed", e)
-                break
+                if (!running.get()) break
+                if (socket.isClosed) {
+                    Log.w(TAG, "accept socket closed under us", e)
+                    consecutiveFailures = ACCEPT_FAILURE_LIMIT
+                } else {
+                    consecutiveFailures++
+                    Log.w(TAG, "accept failed ($consecutiveFailures)", e)
+                }
+                if (consecutiveFailures >= ACCEPT_FAILURE_LIMIT) {
+                    running.set(false)
+                    runCatching { socket.close() }
+                    runCatching { onDied() }
+                    return
+                }
+                runCatching { Thread.sleep(ACCEPT_RETRY_SLEEP_MS) }
+                continue
             }
+            consecutiveFailures = 0
             workers.execute { serve(client) }
         }
         runCatching { socket.close() }
@@ -326,6 +359,10 @@ class HttpServer(
         const val MAX_HEADER_BYTES = 16 * 1024
         const val MAX_HEADERS = 100
         const val DRAIN_LIMIT_BYTES = 64 * 1024L
+
+        /** Consecutive accept() failures before the socket is declared dead. */
+        const val ACCEPT_FAILURE_LIMIT = 5
+        const val ACCEPT_RETRY_SLEEP_MS = 250L
     }
 }
 

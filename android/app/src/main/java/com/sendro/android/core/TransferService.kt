@@ -4,8 +4,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.sendro.android.SendroApplication
@@ -37,9 +39,57 @@ class TransferService : Service() {
     private lateinit var scope: CoroutineScope
     private var started = false
 
+    /**
+     * A TV's screensaver, and a phone's Doze, both park the CPU and can put
+     * the Wi-Fi radio into a power-saving mode that stalls a long transfer for
+     * minutes at a time. The foreground service keeps the *process* alive; it
+     * does not keep the radio awake. These two do, and they are held only
+     * while bytes are actually moving.
+     */
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    }
+
+    private fun holdLocks() {
+        if (wakeLock == null) {
+            val power = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = runCatching {
+                power?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_TAG)?.apply {
+                    setReferenceCounted(false)
+                    // Always time-bounded: a leaked partial wake lock is a
+                    // battery bug that outlives the app.
+                    acquire(WAKE_LOCK_TIMEOUT_MS)
+                }
+            }.getOrNull()
+        } else {
+            runCatching { wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS) }
+        }
+        if (wifiLock == null) {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiLock = runCatching {
+                @Suppress("DEPRECATION")
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifi?.createWifiLock(mode, WAKE_TAG)?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.getOrNull()
+        }
+    }
+
+    private fun releaseLocks() {
+        runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        wakeLock = null
+        runCatching { wifiLock?.let { if (it.isHeld) it.release() } }
+        wifiLock = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -76,11 +126,27 @@ class TransferService : Service() {
             .onEach { (downloads, uploads, host) ->
                 val runningDownload = downloads.firstOrNull { it.phase.isBusy }
                 val runningUpload = uploads.firstOrNull { it.phase.isBusy }
+                // A queued or backpressured item still needs the service: if
+                // the process is allowed to freeze while eighteen files wait
+                // for a slot, the batch never finishes. It just does not get
+                // to outrank something that is actually streaming.
+                val waitingDownload = downloads.firstOrNull { it.phase.isPending }
+                val waitingUpload = uploads.firstOrNull { it.phase.isPending }
+
+                // The radio only needs to stay awake while bytes move; a
+                // queued transfer or an idle receiver host does not need it.
+                val streaming = runningDownload != null || runningUpload != null
+                if (streaming) holdLocks() else releaseLocks()
+
                 when {
                     runningDownload != null ->
                         promote(notificationFor(app, runningDownload, downloads.size))
                     runningUpload != null ->
                         promote(notificationFor(app, runningUpload, uploads.size))
+                    waitingDownload != null ->
+                        promote(notificationFor(app, waitingDownload, downloads.size))
+                    waitingUpload != null ->
+                        promote(notificationFor(app, waitingUpload, uploads.size))
                     // §15: the receiver host outlives any individual transfer.
                     // As long as it is listening the process must stay
                     // foreground, or Android freezes it and a phone's upload
@@ -132,7 +198,9 @@ class TransferService : Service() {
     ) = app.notifier.buildProgressNotification(
         title = item.fileName,
         text = buildString {
-            append(item.phase.label)
+            // shortLabel, not label: a notification line has no room for the
+            // host's full "busy, retrying in 4s" sentence.
+            append(item.phase.shortLabel)
             if (item.phase is UploadPhase.Uploading) {
                 append(" · ")
                 append(Format.bytes(item.bytesSent))
@@ -173,18 +241,29 @@ class TransferService : Service() {
     }
 
     private fun stopEverything() {
+        releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
         started = false
+        releaseLocks()
         if (::scope.isInitialized) scope.cancel()
         super.onDestroy()
     }
 
     companion object {
         private const val TAG = "SendroService"
+        private const val WAKE_TAG = "sendro:transfer"
+
+        /**
+         * A hard ceiling on the wake lock. Re-acquired on every flow emission
+         * while a transfer is live, so a real transfer never hits it; a
+         * transfer that dies without telling anyone cannot hold the CPU past
+         * this.
+         */
+        private const val WAKE_LOCK_TIMEOUT_MS = 30L * 60L * 1000L
 
         /**
          * Ask the service to exist. Safe to call repeatedly; the service is a
@@ -195,15 +274,29 @@ class TransferService : Service() {
          * case where we do not need one — a transfer only ever begins from a
          * user action or while the app is visible.
          */
-        fun start(context: Context) {
+        /**
+         * @return true when the system accepted the start.
+         *
+         * It CANNOT crash: `startForegroundService` throws
+         * `ForegroundServiceStartNotAllowedException` on API 31+ when the
+         * process is in the background without an exemption, and that is
+         * caught here — but the failure is not nothing. On a TV the receiver
+         * host wants this service for its whole life, and a process that woke
+         * up in the background (a boot, a restart after being killed) would
+         * silently never get it. The caller records the answer, surfaces it in
+         * diagnostics, and tries again the moment the app is visible.
+         */
+        fun start(context: Context): Boolean {
             val intent = Intent(context, TransferService::class.java)
-            runCatching {
+            return runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
                 } else {
                     context.startService(intent)
                 }
+                true
             }.onFailure { Log.w(TAG, "could not start transfer service", it) }
+                .getOrDefault(false)
         }
 
         fun stop(context: Context) {

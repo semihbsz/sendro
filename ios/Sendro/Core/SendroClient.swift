@@ -20,9 +20,9 @@ enum SendroClientError: Error, LocalizedError {
         case .badResponse:
             return "Unexpected response from host."
         case .http(let status, let code, let message):
-            if let message, !message.isEmpty { return message }
-            if let code, !code.isEmpty { return "\(code) (HTTP \(status))" }
-            return "HTTP \(status)"
+            // Never leak a bare status code to a person: HostStatus owns the
+            // wording for every code this protocol can produce.
+            return HostStatus.clientMessage(status: status, code: code, message: message)
         case .decoding:
             return "Could not read the host's response."
         }
@@ -35,6 +35,13 @@ enum SendroClientError: Error, LocalizedError {
 
     var httpStatus: Int? {
         if case .http(let status, _, _) = self { return status }
+        return nil
+    }
+
+    /// The host's own `message` field, when it sent one. Distinguishes the
+    /// two 503 flavours ("transfers paused" vs "transfer slots busy").
+    var apiMessage: String? {
+        if case .http(_, _, let message) = self { return message }
         return nil
     }
 }

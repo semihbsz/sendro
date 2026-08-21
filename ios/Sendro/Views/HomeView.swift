@@ -374,6 +374,8 @@ struct HomeView: View {
             .font(Theme.mono(9, .medium))
             .tracking(0.8)
             .foregroundColor(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Capsule().fill(color.opacity(0.13)))
@@ -381,6 +383,10 @@ struct HomeView: View {
 
     private func phaseColor(for phase: TransferPhase) -> Color {
         switch phase {
+        // Queued is a normal, calm state — grey, never red, never iris
+        // (which would read as "this one is moving").
+        case .queued:                    return Theme.textSecondary
+        case .waitingForHost:            return Theme.warn
         case .preparing, .downloading:   return Theme.iris
         case .verifying, .saving:        return Theme.teal
         case .awaitingSaveChoice:        return Theme.irisSoft
@@ -391,6 +397,10 @@ struct HomeView: View {
 
     private func shortLabel(for phase: TransferPhase) -> String {
         switch phase {
+        case .queued(let position):
+            return position <= 1 ? "Next" : "#\(position)"
+        case .waitingForHost(let reason, let seconds):
+            return "\(reason.shortLabel) \(seconds)s"
         case .preparing:         return "Prep"
         case .downloading:       return "Receiving"
         case .verifying:         return "Verifying"

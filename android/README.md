@@ -140,13 +140,95 @@ android/
 | §6.5 status | `TransferEngine.reportStatus` at every phase |
 | §7 upload | `UploadEngine` + `SendroClient.uploadRequest` |
 | §8 filenames | `FileNames` + `SendroClient.rfc5987Encode` |
-| §9 errors | `SendroHttpException`, storage preflight |
+| §9 errors | `HttpStatus.kt` (`HttpDisposition` / `HttpSemantics.explain`), `SendroHttpException`, storage preflight |
 | §10 versions | `DevicesScreen` refuses a mismatched `protocolVersion` |
 | §11 messages | `MessageCenter`, `MessageViews`, the Send composer |
-| §12 bulk accept | `TransferEngine.acceptAll` (Semaphore, ≤4) |
+| §12 bulk accept | `TransferEngine.acceptAll` (≤4 accepts in flight, then the download queue) |
 | §13 QR pairing | `PairLink`, `QrScannerView`, the `sendro://pair` intent filter |
 | §14 Sendro Link | host-side only; nothing to implement here |
 | §15 receiver host | `core/host/` — `HttpServer` + `ReceiverHost` (routing), `HostPairing` (§4 host side), `PeerStore` (token verifiers), `Advertiser` (§2 mDNS registration) |
+
+---
+
+## The download queue and host backpressure
+
+The Windows host gates concurrent downloads (`core/src/server.rs`,
+`settings.concurrency`, default 2, user-settable 1–4) and answers **503 +
+`Retry-After`** once the slots are full. Pause does the same with a longer
+`Retry-After`, and the §14 guest path 503s at eight connections.
+
+Accepting twenty files used to fire twenty downloads, so eighteen of them came
+back 503 and were drawn as failures. That was our bug, not the host's: **503 is
+backpressure, and backpressure is the host working correctly.**
+
+### The queue
+
+There is no separate queue structure. The queue *is* the subset of
+`TransferEngine._active` whose phase is `Queued` or `HostBusy`, ordered by
+`ActiveTransfer.queuedAtMs`. A queued transfer is therefore a first-class,
+visible row with a cancel button — not an invisible entry in a side list that
+can drift out of sync with what the user sees.
+
+| piece | what it guarantees |
+|---|---|
+| `MAX_CONCURRENT_DOWNLOADS = 2` | matches the host's default gate, so the common case never touches it |
+| `enqueue()` | the only way a download ever starts — accept, accept-all, manual retry, relaunch-resume and post-503 retries all funnel through it |
+| `pump()` | the only caller of `startDownload`. Idempotent and re-entrancy safe: a second caller while it runs sets `pumpAgain` and the running pass loops once more, with the flag cleared in the same critical section that observes it, so a request can never be lost |
+| `renumberQueue()` | 1-based place in line, recomputed whenever the queue moves; the row says "Waiting — 3 in line" without knowing the list exists |
+| `queuedAtMs` is set once | a transfer bounced by a 503 keeps its place instead of going to the back every time |
+
+Slot accounting is the job map (`downloadJobs`), not the phase, because a job
+exists from the instant it is launched.
+
+### Backpressure
+
+| key | for | why |
+|---|---|---|
+| **per host** (`hostCooldowns`) | 503 "transfer slots busy" / "transfers paused" / guest limit | the host is what is full; one 503 must not make ten transfers each hammer it |
+| **per transfer** (`transferCooldowns`) | 409 | the host is fine, this one item is not ready |
+
+The delay is `max(Retry-After, our own 1→2→4→8→16→30 s backoff)`, clamped to
+1–30 s. `Retry-After` is parsed as an integer *or* an HTTP-date (a proxy is
+entitled to rewrite it). A one-second ticker — alive only while something is
+waiting — counts the label down and re-pumps so an expired cooldown is noticed
+without anything else having to happen. Cooldowns are cleared wholesale on
+foreground and on network change: a countdown measured against a frozen process
+or a dead interface is meaningless.
+
+A transfer that has had nothing but "busy" for ten minutes stops asking and
+becomes a **resumable** failure the user can retry — a permanent silent
+countdown is its own kind of lie.
+
+`UploadEngine` does the same, per host, and stays strictly sequential.
+
+### No raw status codes, ever
+
+`core/HttpStatus.kt` turns HTTP into two things: a `HttpDisposition` the state
+machine acts on, and a sentence a person can act on. `HttpSemantics.explain`
+words the same code differently for receiving and sending, because it means
+different things: a 404 while receiving is "they cancelled it", a 404 while
+sending is "that device does not accept files".
+
+| code | disposition | receiving | sending |
+|---|---|---|---|
+| 401 | `UNAUTHORIZED` | "X doesn't recognise this device any more. Pair with it again." | same |
+| 403 | `UNAUTHORIZED` | "X refused this transfer…" | "X refused the file…" |
+| 404 / 410 | `GONE` | "X cancelled this one, or it expired. Nothing was lost." | "X isn't accepting files at that address any more." |
+| 409 | `RETRY_SOON` | "X isn't ready for this one yet — trying again shortly." | same |
+| 413 | `FATAL` | "X says the request was too large." | "X refused the file as too large." |
+| 416 | `RANGE_MISMATCH` | "Resuming didn't line up… starting over. Nothing is lost." | n/a (§7 has no ranged upload) |
+| 422 | `INTEGRITY` | "X checked the bytes and they didn't match. Nothing was saved." | "The PC's SHA-256 check failed…" |
+| 429 / 503 | `BACKPRESSURE` | "X is busy with other transfers." / "Transfers are paused on X." / "X has too many guest connections open." | same |
+| 408, other 5xx | `HOST_ERROR` | "Something went wrong on X — trying again." | same |
+
+Also remapped: `SendroHttpException`'s own `message` (it used to end
+`"Request failed (503)"` and could reach the UI through `sendroMessage()`), the
+upload path's `"Host returned HTTP 503."`, and `UpdateChecker`'s
+`IOException("HTTP 404")` on both the manifest and the APK fetch.
+
+The phase rail gained a leading **Queue** step, so a transfer that is merely
+waiting lights the first pip and nothing else. Highlighting *Stream* for
+something that has not moved a byte reads as a lie.
 
 ---
 
@@ -541,6 +623,66 @@ view on their own, including items past the visible bounds.
 
 ---
 
+### TV connection reliability
+
+Everything here came out of real-device testing, and each item is either a
+fault that was found and fixed or a check that came back clean.
+
+**Found and fixed**
+
+| where | fault | fix |
+|---|---|---|
+| `Discovery.kt` resolve worker | a resolve that failed or timed out dropped the service forever. NsdManager reports a service **once**; it does not re-announce one it has already handed over, so a single `FAILURE_ALREADY_ACTIVE` made that PC invisible until the user pressed "Restart discovery" | failed resolves are retried up to four times, keeping their slot in `pendingResolves` so `onServiceFound` cannot double-queue them; after that the failure becomes a diagnostic line |
+| `Discovery.kt` listener callbacks | `onDiscoveryStopped` / `onStartDiscoveryFailed` / `onStopDiscoveryFailed` left `listener` non-null, so every later `start()` returned immediately — the system tearing the browser down (an interface going away on a TV does exactly this) ended discovery for the life of the process | all three clear the listener by identity, and a 20 s watchdog rebuilds a browser that should be running but is not |
+| `NetworkWatcher.kt` | the `NetworkRequest` demanded `NET_CAPABILITY_INTERNET`. A LAN with no upstream — a router without internet, a PC hotspot, a TV on an isolated switch — never gains it, so **no callback ever fired** and network changes went unnoticed | the capability is gone; only transports are requested |
+| `NetworkWatcher.refresh` | transports were read from `activeNetwork` alone. Android makes a validated cellular link the active network whenever Wi-Fi has no internet — exactly Sendro's situation — so the app reported "cellular" while sitting on the PC's Wi-Fi, and bumped `changeToken` spuriously | transports are the union across every network the callback knows about, pruned against the system on each refresh; "metered" still comes from the default route, which is genuinely what it describes |
+| `HttpServer.acceptLoop` | one `IOException` from `accept()` **broke the loop permanently** while `running` stayed true — the receiver went deaf while every status in the app still said "Ready to receive" | transient failures sleep 250 ms and retry; a closed socket, or five consecutive failures, calls `onDied` |
+| `ReceiverHost.kt` | nothing rebound a dead socket, and a bind that failed at boot (interface not up yet — the most common TV symptom) was permanent | `onDied` rebinds after a second; a 20 s watchdog compares intent against reality and rebinds when they disagree; `onNetworkChanged` now also rebinds instead of only re-advertising |
+| `Advertiser.kt` | `onRegistrationFailed` left the listener set (so the next attempt threw before it tried) and was completely invisible: the app said "Ready to receive" and no phone could ever find it | the listener is dropped by identity, `lastError` carries a sentence, and the receiver-host watchdog re-registers until it takes |
+| `TransferEngine.pollLoop` | an unexpected throw outside the inner `try` ended that host's loop for good — indistinguishable, from the user's seat, from the PC being switched off | the loop body is supervised and restarts after 2 s, and a 30 s watchdog runs `reconcileLoops()` so any dead loop is revived |
+| `TransferService` | the foreground service kept the *process* alive but did nothing about the radio, so a TV screensaver or Doze could stall a long transfer for minutes | a time-bounded `PARTIAL_WAKE_LOCK` plus a `WIFI_MODE_FULL_LOW_LATENCY` Wi-Fi lock, held only while bytes are actually moving, refreshed on every progress emission |
+| `SendroApplication.syncForegroundService` | queued transfers did not hold the service, so a batch could be frozen while eighteen files waited for a slot | the check is `phase.isLive` (busy **or** pending) for both engines |
+
+**Checked and already correct**
+
+* The multicast lock is **not** gated on Wi-Fi being the active transport. It is
+  acquired whenever browsing or advertising starts, and simply absent on a
+  device with no Wi-Fi radio — which is right, because Ethernet multicast does
+  not need it.
+* `HttpServer` binds `0.0.0.0`, so the listening socket genuinely does survive
+  an ordinary interface change; only mDNS has to be redone.
+* The poll loop's discipline was sound: online state comes only from ping /
+  long-poll success (never from discovery, so manual hosts work), an empty 200
+  is the normal long-poll timeout and re-polls immediately, a poll error alone
+  never marks a host offline without a confirming ping, and real unreachability
+  backs off 1→2→4→8→15 s and retries forever.
+* The §15.1 receive-only latch (a 404 on the outbox) still keeps a TV peer on a
+  cheap 10 s ping instead of long-polling something that will never offer.
+* A transfer killed mid-flight is `Interrupted`, its `.part` is kept, and the
+  next successful poll resumes it byte-accurately (the prefix is re-hashed from
+  disk, never trusted).
+
+**`startForegroundService` from `Application.onCreate` — confirmed**
+
+It **cannot crash**: `TransferService.start` wraps it in `runCatching`, so
+`ForegroundServiceStartNotAllowedException` on API 31+ is swallowed. But it can
+silently do nothing, which on a TV means the receiver host is unprotected. So
+`start` now returns whether the system accepted it, `SendroApplication` records
+`foregroundServiceBlocked`, retries on `ProcessLifecycleOwner.onStart`, and the
+diagnostics panel says so in plain language.
+
+**Diagnostics for what cannot be fixed in-app**
+
+Settings ▸ Diagnostics now shows: a warning when the device is connected but
+has neither Wi-Fi nor Ethernet, the discovery status *and* a note line for a
+resolve that could not be completed or an mDNS service that is out of slots,
+the receiver's listening address, the name it is **announced as** (or why it is
+not announced at all), and the foreground-service refusal above. The receiver
+pairing card repeats the "listening but invisible" warning, because that is the
+worst failure this feature has: everything looks fine.
+
+---
+
 ## Known limitations and rough edges
 
 Honest list, in rough order of how likely they are to bite:
@@ -557,80 +699,90 @@ Honest list, in rough order of how likely they are to bite:
    `TokenStore` degrades to plain SharedPreferences (with the file wiped first)
    if the Keystore is unusable, and Settings shows which mode is in effect.
 4. **Foreground-service start can be refused.** On API 31+ an app in the
-   background may not start one. Sendro only ever starts a transfer from a user
-   action or while visible, so this should not happen — but a transfer that
-   begins from an auto-accepted offer while the app is backgrounded will run
-   without service protection and may be frozen by the OS.
+   background may not start one. It is caught, recorded, surfaced in
+   diagnostics and retried the moment the app is visible — but between the
+   refusal and the retry a transfer runs without service protection and may be
+   frozen by the OS. There is no in-app fix for this; the honest answer is the
+   diagnostic line.
 5. **Background delivery is best-effort, and less good than iOS.** The outbox
    long poll only runs while the process is alive. Doze and App Standby will
    eventually freeze it. There is no push, by design.
 6. **mDNS is unreliable on some networks and devices.** Guest Wi-Fi and many
-   hotspots drop multicast entirely. Connect-by-IP is a first-class path for
-   exactly this reason, and the Devices screen says so.
+   hotspots drop multicast entirely, and `NsdManager`'s resolver is genuinely
+   flaky on some TV boxes. Failed resolves are retried and the browser is
+   watchdogged, but when the system's mDNS service is simply out of slots there
+   is nothing to do but say so — connect-by-IP is a first-class path for
+   exactly this reason, and both the Devices screen and Diagnostics say so.
 7. **`ACTION_VIEW` install path.** The updater hands the APK to the system
    installer. If the user has not granted "install unknown apps" the first tap
    opens that settings screen instead; they must come back and tap Install
    again. `PackageInstaller`'s session API would not improve this without a
    privilege we do not have.
 8. **No ranged upload (§7).** A failed phone→PC upload restarts from byte 0.
-   That is the protocol's v1 shape, not an implementation gap.
-9. **`Environment.DIRECTORY_DOWNLOADS` + `RELATIVE_PATH` subfolders** are
+   That is the protocol's v1 shape, not an implementation gap. It is also why
+   an upload that gets a 503 resets `bytesSent` to zero before parking.
+9. **The queue's width is a guess about the host.** `MAX_CONCURRENT_DOWNLOADS`
+   is 2 to match the host's default. A user who lowers `concurrency` to 1 will
+   still see one 503 per batch — absorbed as backpressure, never as a failure,
+   but it does cost a round trip. There is no endpoint that reports the host's
+   setting, so reading it is not possible without a protocol change.
+10. **`Environment.DIRECTORY_DOWNLOADS` + `RELATIVE_PATH` subfolders** are
    honoured by AOSP but a few OEM MediaStore implementations flatten them.
    The save falls back to app-private storage rather than failing.
-10. **Legacy storage (API 26–28).** The `WRITE_EXTERNAL_STORAGE` runtime request
+11. **Legacy storage (API 26–28).** The `WRITE_EXTERNAL_STORAGE` runtime request
     is not wired into a screen yet: `MediaSaver` reports
     `NeedsStoragePermission`, the transfer parks in `StorageDenied`, and the
     Flight screen offers "keep in Files". On API 29+ (the overwhelming
     majority) this path never runs.
-11. **Turkish UI is not localised.** English UI, consistent with iOS. Only the
+12. **Turkish UI is not localised.** English UI, consistent with iOS. Only the
     update notes prefer `notesTr`.
-12. **No instrumented tests.** The unit tests cover the parts that are provable
+13. **No instrumented tests.** The unit tests cover the parts that are provable
     on a JVM; the engine's timing behaviour is not covered by anything but a
     real device.
-13. **TV focus was verified by reading the focus graph, not by running it.**
+14. **TV focus was verified by reading the focus graph, not by running it.**
     There is no TV emulator here. The layouts are built so that Compose's 2D
     search has an unambiguous answer everywhere (no overlapping focusable
     layers, no holes in the keypad grid, action pairs in Rows inside
     `focusGroup`s), but the first real run on a TV is where any residual
     "D-pad presses do nothing here" bug will surface.
-14. **The TV banner is a generated 320x180 PNG.** It was drawn from the same
+15. **The TV banner is a generated 320x180 PNG.** It was drawn from the same
     beam geometry as the app icon (`scripts/generate_icons.py`) with the
     wordmark set in DejaVu Sans Bold, because the UI's actual font (Roboto)
     was not available to the generator. At banner size it reads as the brand;
     if that ever matters, regenerate it with Roboto.
-15. **`VideoView` seek granularity** depends on the container. On a
+16. **`VideoView` seek granularity** depends on the container. On a
     non-seekable stream `seekTo` is a no-op and the HUD will show the position
     not moving; there is no error, it just does not seek.
-16. **A §11 message arriving while an overlay is open waits** on TV, because an
+17. **A §11 message arriving while an overlay is open waits** on TV, because an
     explicit destination (pairing, settings, a live transfer) must not be
     hijacked. It appears the moment that destination closes. On a phone the
     banner shows immediately.
-17. **The receiver host has never spoken to a real client.** The HTTP parser,
+18. **The receiver host has never spoken to a real client.** The HTTP parser,
     the chunked decoder and the §4 host-side pairing were written against the
     spec and unit-tested, but the first conversation with the Rust host or with
     OkHttp is where a framing or header-case assumption will show.
-18. **`Connection: close` on every response.** Correct and universally
+19. **`Connection: close` on every response.** Correct and universally
     supported, but it means one TCP connection per request; a client that
     assumed keep-alive would just be slower, not broken.
-19. **Plain HTTP, as §3 specifies for v1.** The receiver listens on 0.0.0.0.
+20. **Plain HTTP, as §3 specifies for v1.** The receiver listens on 0.0.0.0.
     On a hostile network anyone who can reach the port can attempt pairing —
     they still need the six digits, but do not run this on a coffee-shop
     Wi-Fi with the toggle on.
-20. **A phone paired to a TV shows the TV as a target only while the TV is
+21. **A phone paired to a TV shows the TV as a target only while the TV is
     reachable.** There is no "offline queue" for phone → TV; §7 has no resume,
     so a failed upload restarts from byte 0.
-21. **`getPackageArchiveInfo` returns null for some APKs** (v2-signing-only
+22. **`getPackageArchiveInfo` returns null for some APKs** (v2-signing-only
     edge cases, or a corrupt archive). Sendro then shows a plain warning
     instead of package details and still lets the user install deliberately.
-22. **The cleartext policy is global.** `base-config` permits plain HTTP to
+23. **The cleartext policy is global.** `base-config` permits plain HTTP to
     *any* host that is not github; it cannot be limited to RFC1918 ranges
     because the platform's `<domain>` has no CIDR form. The mitigation is that
     the only non-LAN URL in the app is the pinned update manifest.
-23. **The Windows client role is new on both sides.** The TV's host has never
+24. **The Windows client role is new on both sides.** The TV's host has never
     seen a `pair/start` from the real Windows app — the field names and the
     `platform` string are per §4.1, but the first handshake is where a
     mismatch would show.
-24. **The home-screen pair banner ticks a 500 ms clock** while a request is
+25. **The home-screen pair banner ticks a 500 ms clock** while a request is
     pending. It stops when the session clears, but a session that somehow
     never expires would keep the TV home screen recomposing.
 

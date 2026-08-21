@@ -20,6 +20,12 @@ import UIKit
 // MARK: - UI-facing state
 
 enum TransferPhase: Equatable {
+    /// Accepted, waiting for one of the engine's download slots. `position`
+    /// is 1-based across the whole queue ("#3 in line"). NOT an error state.
+    case queued(position: Int)
+    /// The host answered with backpressure (503 / 429 / 409 / other 5xx) and
+    /// we are counting down to the next attempt. Also NOT an error state.
+    case waitingForHost(reason: HostBusyReason, secondsRemaining: Int)
     case preparing                      // preflight + prefix re-hash
     case downloading
     case verifying
@@ -31,6 +37,8 @@ enum TransferPhase: Equatable {
 
     var label: String {
         switch self {
+        case .queued:            return "Waiting…"
+        case .waitingForHost:    return "Waiting for the PC…"
         case .preparing:         return "Preparing…"
         case .downloading:       return "Downloading"
         case .verifying:         return "Verifying…"
@@ -39,6 +47,15 @@ enum TransferPhase: Equatable {
         case .photosDenied:      return "Photos Access Needed"
         case .failed:            return "Failed"
         case .interrupted:       return "Paused"
+        }
+    }
+
+    /// True while the transfer is parked on purpose — queued behind other
+    /// files, or waiting out host backpressure. Never render these red.
+    var isWaiting: Bool {
+        switch self {
+        case .queued, .waitingForHost: return true
+        default:                       return false
         }
     }
 }
@@ -50,6 +67,10 @@ struct ActiveTransfer: Identifiable {
     var bytesReceived: Int64
     var speedBytesPerSecond: Double
     var etaSeconds: Int?
+    /// A calm one-liner explaining something the numbers alone would make
+    /// look like a bug — currently only "we had to start over from byte 0".
+    /// Never an error; errors live in `.failed`.
+    var note: String? = nil
 
     var id: String { offer.transferId }
 
@@ -94,6 +115,21 @@ final class TransferEngine: ObservableObject {
     /// concurrency; never more than this many in flight.
     static let bulkAcceptConcurrency = 4
 
+    /// How many transfers may be STREAMING at once. Matches the host's own
+    /// default gate (`settings.concurrency`, 2): starting more than this only
+    /// earns a 503 per extra file and splits the same LAN bandwidth into
+    /// slower slices. Everything else sits in a real queue.
+    static let maxConcurrentDownloads = 2
+
+    /// How long a transfer may keep bouncing off host backpressure before it
+    /// is parked as a (still resumable) failure. Ten minutes of "the PC is
+    /// busy / paused" is patience; an hour is a hang.
+    static let backpressureGiveUpSeconds: TimeInterval = 10 * 60
+
+    /// A bulk accept holds one of only `bulkAcceptConcurrency` slots, so it
+    /// waits out host backpressure for far less time than a single accept.
+    static let bulkAcceptPatienceSeconds: TimeInterval = 30
+
     private let settings: Settings
     private let paired: PairedHostStore
     private let history: HistoryStore
@@ -105,11 +141,48 @@ final class TransferEngine: ObservableObject {
     private let notifier: Notifier
 
     private var pollTasks: [String: Task<Void, Never>] = [:]
+    /// Currently STREAMING. `downloads.count` is the occupied-slot count.
     private var downloads: [String: DownloadTask] = [:]
     private var processedOfferIds: Set<String> = []
     private var autoResumed: Set<String> = []
     private var cancellables: Set<AnyCancellable> = []
     private var started = false
+
+    // MARK: Download queue
+
+    /// Transfer ids waiting for a slot, in the order they will start. Every
+    /// id here also has a row in `active`, which is where its offer/hostId
+    /// live — the queue itself stays a plain list of ids so reordering and
+    /// de-duplication are trivial.
+    private var queue: [String] = []
+
+    /// Per-host cooldown after a host-WIDE refusal (503 slots busy / paused,
+    /// 429, other 5xx). While `Date() < until` the pump will not start ANY
+    /// transfer for that host — otherwise the queue would simply rotate
+    /// through every waiting file collecting one 503 each.
+    private var hostBusyUntil: [String: Date] = [:]
+    private var hostBusyReason: [String: HostBusyReason] = [:]
+
+    /// Per-transfer cooldown, for refusals that are about this file only
+    /// (409 "not ready yet"). Holding the whole host back for one file that
+    /// has not finished hashing would stall the rest of the batch.
+    private var transferBusyUntil: [String: Date] = [:]
+    private var transferBusyReason: [String: HostBusyReason] = [:]
+
+    /// Per-transfer backpressure history, for the growing delay and the
+    /// give-up clock. Cleared the moment real bytes start arriving.
+    private var backpressureAttempts: [String: Int] = [:]
+    private var backpressureSince: [String: Date] = [:]
+
+    /// Re-entrancy guard for `pumpQueue()`. It is called from status
+    /// callbacks, the ticker, the poll loop and the UI, so it must be safe
+    /// to call at any moment, including from inside itself.
+    private var isPumping = false
+    private var pumpRequested = false
+
+    /// One 1 Hz tick for the whole queue (countdowns + cooldown expiry),
+    /// alive only while something is actually waiting.
+    private var queueTicker: Task<Void, Never>?
 
     nonisolated init(settings: Settings,
                      paired: PairedHostStore,
@@ -163,7 +236,12 @@ final class TransferEngine: ObservableObject {
         // fresh loop re-pings and the indicator reflects reality, not the
         // last pre-suspension failure (or success).
         hostOnline.removeAll()
+        // Backpressure is a foreground concept: a stretch spent suspended
+        // must not count against the give-up clock, and a host that was busy
+        // ten minutes ago deserves a fresh try right now.
+        clearAllBackpressure()
         reconcileLoops()   // spawns fresh loops (backoff starts at zero)
+        pumpQueue()
     }
 
     /// Call when NWPathMonitor reports a different network (joining the PC's
@@ -180,7 +258,59 @@ final class TransferEngine: ObservableObject {
         for task in pollTasks.values { task.cancel() }
         pollTasks.removeAll()
         hostOnline.removeAll()
+        clearAllBackpressure()
         reconcileLoops()
+        pumpQueue()
+    }
+
+    /// Forget every host cooldown and every per-transfer retry history.
+    /// Queued transfers stay queued; they just get to try again immediately.
+    private func clearAllBackpressure() {
+        hostBusyUntil.removeAll()
+        hostBusyReason.removeAll()
+        transferBusyUntil.removeAll()
+        transferBusyReason.removeAll()
+        backpressureAttempts.removeAll()
+        backpressureSince.removeAll()
+    }
+
+    /// When does this transfer become startable, and why is it waiting?
+    /// The later of its own cooldown and its host's wins.
+    private func waitState(transferId: String, hostId: String) -> (until: Date, reason: HostBusyReason)? {
+        var best: (until: Date, reason: HostBusyReason)?
+        if let until = hostBusyUntil[hostId] {
+            best = (until: until, reason: hostBusyReason[hostId] ?? .hostProblem)
+        }
+        if let until = transferBusyUntil[transferId],
+           until > (best?.until ?? .distantPast) {
+            best = (until: until, reason: transferBusyReason[transferId] ?? .notReady)
+        }
+        return best
+    }
+
+    /// Record a cooldown. Host-wide reasons hold the whole host back; a
+    /// per-file reason holds only that file.
+    private func armCooldown(transferId: String, hostId: String,
+                             reason: HostBusyReason, delay: Int) {
+        let until = Date().addingTimeInterval(TimeInterval(delay))
+        if reason == .notReady {
+            if (transferBusyUntil[transferId] ?? .distantPast) < until {
+                transferBusyUntil[transferId] = until
+            }
+            transferBusyReason[transferId] = reason
+        } else {
+            if (hostBusyUntil[hostId] ?? .distantPast) < until {
+                hostBusyUntil[hostId] = until
+            }
+            hostBusyReason[hostId] = reason
+        }
+    }
+
+    private func clearCooldowns(transferId: String, hostId: String) {
+        transferBusyUntil[transferId] = nil
+        transferBusyReason[transferId] = nil
+        hostBusyUntil[hostId] = nil
+        hostBusyReason[hostId] = nil
     }
 
     // MARK: Pairing management
@@ -189,12 +319,28 @@ final class TransferEngine: ObservableObject {
         pollTasks[hostId]?.cancel()
         pollTasks[hostId] = nil
         hostOnline[hostId] = nil
+        hostBusyUntil[hostId] = nil
+        hostBusyReason[hostId] = nil
+        // Anything of theirs still waiting for a slot can never start now.
+        let orphaned = queue.filter { queuedHostId($0) == hostId }
+        queue.removeAll { orphaned.contains($0) }
+        for transferId in orphaned {
+            backpressureAttempts[transferId] = nil
+            backpressureSince[transferId] = nil
+            transferBusyUntil[transferId] = nil
+            transferBusyReason[transferId] = nil
+        }
         for transfer in active where transfer.hostId == hostId {
             downloads[transfer.id]?.cancel()
         }
         incomingOffers.removeAll { $0.hostId == hostId }
         KeychainStore.deleteToken(forHost: hostId)
         paired.remove(id: hostId)
+        pumpQueue()
+    }
+
+    private func queuedHostId(_ transferId: String) -> String? {
+        active.first { $0.id == transferId }?.hostId
     }
 
     func pingHost(_ hostId: String) async -> String {
@@ -293,11 +439,29 @@ final class TransferEngine: ObservableObject {
             failBulkItem(transferId, "That computer is not reachable right now.")
             return
         }
-        do {
-            try await client.accept(transferId: transferId)
-        } catch {
-            failBulkItem(transferId, "Couldn't accept: \(error.localizedDescription)")
+        // The row stays in its "accepting" state while this waits out any
+        // host backpressure — a busy or still-hashing PC is not an error.
+        // Short patience on purpose: this occupies one of only
+        // `bulkAcceptConcurrency` slots, so it must never park for minutes
+        // and starve the rest of the batch. On timeout the offer simply
+        // stays pending with a calm note and the user can tap Accept again.
+        let stillPending: () -> Bool = { [weak self] in
+            self?.incomingOffers.contains { $0.id == transferId } ?? false
+        }
+        let outcome = await acceptWithBackpressure(client,
+                                                   offer: offer,
+                                                   hostId: hostId,
+                                                   patience: Self.bulkAcceptPatienceSeconds,
+                                                   isAlive: stillPending,
+                                                   onWaiting: nil)
+        switch outcome {
+        case .abandoned:
             return
+        case .refused(let message):
+            failBulkItem(transferId, message)
+            return
+        case .accepted:
+            break
         }
         guard incomingOffers.contains(where: { $0.id == transferId }) else {
             // Declined or accepted individually while this call was in flight.
@@ -306,7 +470,7 @@ final class TransferEngine: ObservableObject {
         incomingOffers.removeAll { $0.id == transferId }
         processedOfferIds.insert(transferId)
         addRecord(offer: offer, hostId: hostId)
-        startDownload(offer: offer, hostId: hostId)
+        enqueueDownload(offer: offer, hostId: hostId)
     }
 
     private func failBulkItem(_ transferId: String, _ message: String) {
@@ -337,13 +501,24 @@ final class TransferEngine: ObservableObject {
     // MARK: Transfer control (UI)
 
     func cancel(transferId: String) {
+        // Leave the queue first, whatever state this is in — otherwise the
+        // pump could start a transfer the user just removed.
+        queue.removeAll { $0 == transferId }
+        backpressureAttempts[transferId] = nil
+        backpressureSince[transferId] = nil
+        transferBusyUntil[transferId] = nil
+        transferBusyReason[transferId] = nil
+
         if let download = downloads[transferId] {
             download.cancel()            // outcome .cancelled flows through handleOutcome
             return
         }
-        // Not currently running (failed / interrupted / awaiting choice /
-        // photos-denied).
-        guard let idx = active.firstIndex(where: { $0.id == transferId }) else { return }
+        // Not currently running (queued / waiting for host / failed /
+        // interrupted / awaiting choice / photos-denied).
+        guard let idx = active.firstIndex(where: { $0.id == transferId }) else {
+            pumpQueue()
+            return
+        }
         let transfer = active[idx]
         try? FileManager.default.removeItem(at: AppPaths.partFileURL(transferId: transferId))
         try? FileManager.default.removeItem(at: Self.stagedImportURL(for: transfer.offer))
@@ -359,16 +534,24 @@ final class TransferEngine: ObservableObject {
                     senderName: transfer.offer.senderName,
                     outcome: "cancelled")
         updateIdleTimer()
+        pumpQueue()
     }
 
-    /// Resume or retry a failed / interrupted transfer.
+    /// Resume / retry / "try now". Every one of these goes back through the
+    /// queue — nothing bypasses the slot limit, ever.
     func resume(transferId: String) {
         guard let transfer = active.first(where: { $0.id == transferId }) else { return }
         switch transfer.phase {
-        case .failed, .interrupted:
+        case .failed, .interrupted, .queued, .waitingForHost:
+            // An explicit tap means "try now": forget the accumulated delay
+            // and the host cooldown so this attempt happens immediately.
+            backpressureAttempts[transferId] = nil
+            backpressureSince[transferId] = nil
+            clearCooldowns(transferId: transferId, hostId: transfer.hostId)
+            setNote(transferId, nil)
             if hasRecord(transferId) {
                 // Already accepted on the host — just download again (ranged).
-                startDownload(offer: transfer.offer, hostId: transfer.hostId)
+                enqueueDownload(offer: transfer.offer, hostId: transfer.hostId, atFront: true)
             } else {
                 // Never accepted (e.g. storage preflight blocked it).
                 Task { await self.acceptAndStart(offer: transfer.offer, hostId: transfer.hostId) }
@@ -405,6 +588,211 @@ final class TransferEngine: ObservableObject {
         let url = URL(fileURLWithPath: NSHomeDirectory())
         let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    // MARK: - Download queue
+    //
+    // Invariants:
+    // - `downloads` holds exactly the streaming transfers; its count is the
+    //   occupied-slot count and never exceeds `maxConcurrentDownloads`.
+    // - Every id in `queue` has a row in `active` whose phase is `.queued`
+    //   or `.waitingForHost`. Nothing else is ever in `queue`.
+    // - `pumpQueue()` is idempotent, re-entrant-safe and cheap; call it from
+    //   anywhere a slot might have freed or a cooldown might have expired.
+
+    /// The ONE way a download is ever started. Accept, "Accept all", Retry,
+    /// Resume, auto-resume after relaunch and every backpressure requeue all
+    /// funnel through here.
+    ///
+    /// - Parameter atFront: for requeues that already had their turn (a 503
+    ///   bounce, a 416 restart) so they do not lose their place to files
+    ///   accepted after them.
+    private func enqueueDownload(offer: TransferOffer, hostId: String, atFront: Bool = false) {
+        let transferId = offer.transferId
+        // Already streaming — nothing to do, and definitely not a second task.
+        guard downloads[transferId] == nil else { return }
+
+        upsertActive(offer: offer, hostId: hostId, phase: .queued(position: queue.count + 1))
+
+        if let existing = queue.firstIndex(of: transferId) {
+            if atFront, existing != 0 {
+                queue.remove(at: existing)
+                queue.insert(transferId, at: 0)
+            }
+        } else if atFront {
+            queue.insert(transferId, at: 0)
+        } else {
+            queue.append(transferId)
+        }
+        pumpQueue()
+    }
+
+    /// Start as many queued transfers as there are free slots, then refresh
+    /// what every waiting row says about itself.
+    private func pumpQueue() {
+        if isPumping {
+            // Re-entered (a start path failed synchronously and pumped
+            // again). Ask the outer call to go round once more instead of
+            // recursing.
+            pumpRequested = true
+            return
+        }
+        isPumping = true
+        repeat {
+            pumpRequested = false
+            drainQueue()
+        } while pumpRequested
+        isPumping = false
+
+        refreshQueuePhases()
+        updateIdleTimer()
+        ensureQueueTicker()
+    }
+
+    private func drainQueue() {
+        guard !queue.isEmpty else { return }
+        let now = Date()
+        var index = 0
+        while downloads.count < Self.maxConcurrentDownloads, index < queue.count {
+            let transferId = queue[index]
+            guard let transfer = active.first(where: { $0.id == transferId }) else {
+                queue.remove(at: index)          // row vanished — drop the id
+                continue                         // same index, array shrank
+            }
+            let hostId = transfer.hostId
+            // Told to come back later — by this host (everything of its
+            // waits) or about this file (only it waits).
+            if let wait = waitState(transferId: transferId, hostId: hostId), wait.until > now {
+                index += 1
+                continue
+            }
+            // A host we know is unreachable: keep the place, skip the doomed
+            // request. `markOnline` pumps again the moment it answers.
+            if hostOnline[hostId] == false {
+                index += 1
+                continue
+            }
+            queue.remove(at: index)              // same index, array shrank
+            beginStreaming(offer: transfer.offer, hostId: hostId)
+        }
+    }
+
+    /// Keep every waiting row honest: its place in line, or its countdown.
+    private func refreshQueuePhases() {
+        let now = Date()
+        for (position, transferId) in queue.enumerated() {
+            guard let idx = active.firstIndex(where: { $0.id == transferId }) else { continue }
+            let hostId = active[idx].hostId
+            let phase: TransferPhase
+            if let wait = waitState(transferId: transferId, hostId: hostId), wait.until > now {
+                let seconds = max(1, Int(wait.until.timeIntervalSince(now).rounded(.up)))
+                phase = .waitingForHost(reason: wait.reason, secondsRemaining: seconds)
+            } else {
+                phase = .queued(position: position + 1)
+            }
+            if active[idx].phase != phase {
+                active[idx].phase = phase
+                active[idx].speedBytesPerSecond = 0
+                active[idx].etaSeconds = nil
+            }
+        }
+    }
+
+    /// A single 1 Hz tick drives every countdown and every cooldown expiry.
+    /// It exists only while something is waiting and ends itself otherwise.
+    private func ensureQueueTicker() {
+        guard queueTicker == nil,
+              !queue.isEmpty || !hostBusyUntil.isEmpty || !transferBusyUntil.isEmpty else { return }
+        queueTicker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                guard let self else { return }
+                self.expireCooldowns()
+                self.pumpQueue()
+                if self.queue.isEmpty && self.hostBusyUntil.isEmpty
+                    && self.transferBusyUntil.isEmpty {
+                    self.queueTicker = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func expireCooldowns() {
+        let now = Date()
+        // Snapshot the keys: the dictionaries are mutated inside the loops.
+        for hostId in hostBusyUntil.compactMap({ $0.value <= now ? $0.key : nil }) {
+            hostBusyUntil[hostId] = nil
+            hostBusyReason[hostId] = nil
+        }
+        for transferId in transferBusyUntil.compactMap({ $0.value <= now ? $0.key : nil }) {
+            transferBusyUntil[transferId] = nil
+            transferBusyReason[transferId] = nil
+        }
+    }
+
+    /// A stream just ended (verified, failed, cancelled — anything but a
+    /// bounce), so a slot on the HOST just freed too. Drop a "slots busy"
+    /// cooldown immediately instead of sitting out its timer for nothing.
+    /// A pause or a host-side error is not cured by our stream ending, so
+    /// those cooldowns are left to run out.
+    private func noteStreamEnded(_ hostId: String) {
+        if hostBusyReason[hostId] == .slotsBusy {
+            hostBusyUntil[hostId] = nil
+            hostBusyReason[hostId] = nil
+        }
+    }
+
+    /// The 503 (and 429 / 409 / 5xx) landing point. This is NEVER a failure:
+    /// the transfer goes straight back into the queue with a countdown, and
+    /// every byte already on disk stays exactly where it is.
+    private func noteBackpressure(offer: TransferOffer,
+                                  hostId: String,
+                                  info: HostBackpressure) {
+        let transferId = offer.transferId
+        let attempts = (backpressureAttempts[transferId] ?? 0) + 1
+        backpressureAttempts[transferId] = attempts
+        let since = backpressureSince[transferId] ?? Date()
+        backpressureSince[transferId] = since
+
+        let hostName = offer.senderName
+
+        // Give up only after a long stretch — and even then, resumable, with
+        // the partial file intact.
+        if Date().timeIntervalSince(since) > Self.backpressureGiveUpSeconds {
+            backpressureAttempts[transferId] = nil
+            backpressureSince[transferId] = nil
+            let message = info.reason.giveUpMessage(hostName: hostName)
+            sendStatus(hostId, transferId, StatusReport(state: "failed", error: "host busy"))
+            setPhase(transferId, .failed(message: message, resumable: true))
+            LiveActivityController.shared.end(transferId: transferId,
+                                              phase: .failed,
+                                              bytesReceived: activeBytes(transferId))
+            notifier.notifyTransferFailed(fileName: offer.fileName, reason: "the PC stayed busy")
+            return
+        }
+
+        // Exponential-ish, floored by the host's own Retry-After and capped
+        // at 30 s: 1x, 2x, 4x, 8x, then flat.
+        let multiplier = 1 << min(max(attempts - 1, 0), 3)
+        let delay = HostStatus.clampRetryAfter(info.retryAfterSeconds * multiplier)
+        armCooldown(transferId: transferId, hostId: hostId, reason: info.reason, delay: delay)
+
+        // Keep the Lock Screen honest too — "Receiving" while parked is the
+        // same lie as a highlighted STREAM rail.
+        LiveActivityController.shared.update(transferId: transferId,
+                                             phase: .waiting,
+                                             bytesReceived: activeBytes(transferId),
+                                             speedBytesPerSecond: 0,
+                                             etaSeconds: nil,
+                                             force: true)
+        // Tell the host we are parked, not gone: still "downloading" from
+        // its point of view, at the offset we already hold.
+        sendStatus(hostId, transferId,
+                   StatusReport(state: "downloading", bytesReceived: activeBytes(transferId)))
+
+        enqueueDownload(offer: offer, hostId: hostId, atFront: true)
     }
 
     // MARK: - Poll loops
@@ -508,9 +896,11 @@ final class TransferEngine: ObservableObject {
     }
 
     private func markOnline(_ hostId: String, _ online: Bool) {
-        if hostOnline[hostId] != online {
-            hostOnline[hostId] = online
-        }
+        guard hostOnline[hostId] != online else { return }
+        hostOnline[hostId] = online
+        // A host coming back is the single best moment to start whatever of
+        // its was parked waiting for it.
+        if online { pumpQueue() }
     }
 
     /// - Returns: true when this offer is newly waiting for the user (an
@@ -536,7 +926,7 @@ final class TransferEngine: ObservableObject {
         for transfer in active where transfer.hostId == hostId {
             if transfer.phase == .interrupted, !autoResumed.contains(transfer.id) {
                 autoResumed.insert(transfer.id)
-                startDownload(offer: transfer.offer, hostId: hostId)
+                enqueueDownload(offer: transfer.offer, hostId: hostId)
             }
         }
     }
@@ -557,25 +947,115 @@ final class TransferEngine: ObservableObject {
         upsertActive(offer: offer, hostId: hostId, phase: .preparing)
 
         guard let client = client(for: hostId) else {
-            setPhase(offer.transferId, .failed(message: "Host is not reachable.", resumable: true))
+            setPhase(offer.transferId,
+                     .failed(message: "\(offer.senderName) is not reachable right now.", resumable: true))
             return
         }
-        do {
-            try await client.accept(transferId: offer.transferId)
-        } catch {
-            setPhase(offer.transferId,
-                     .failed(message: "Could not accept: \(error.localizedDescription)", resumable: true))
+        let transferId = offer.transferId
+        let stillWanted: () -> Bool = { [weak self] in
+            self?.active.contains { $0.id == transferId } ?? false
+        }
+        let showCountdown: (HostBusyReason, Int) -> Void = { [weak self] reason, seconds in
+            self?.setPhase(transferId, .waitingForHost(reason: reason, secondsRemaining: seconds))
+        }
+        let outcome = await acceptWithBackpressure(client,
+                                                   offer: offer,
+                                                   hostId: hostId,
+                                                   patience: Self.backpressureGiveUpSeconds,
+                                                   isAlive: stillWanted,
+                                                   onWaiting: showCountdown)
+        switch outcome {
+        case .abandoned:
             return
+        case .refused(let message):
+            setPhase(transferId, .failed(message: message, resumable: true))
+            return
+        case .accepted:
+            break
         }
         addRecord(offer: offer, hostId: hostId)
-        startDownload(offer: offer, hostId: hostId)
+        enqueueDownload(offer: offer, hostId: hostId)
     }
 
-    private func startDownload(offer: TransferOffer, hostId: String) {
+    /// What `acceptWithBackpressure` concluded.
+    private enum AcceptOutcome {
+        case accepted
+        /// The user removed the offer/transfer while we were waiting.
+        case abandoned
+        case refused(String)
+    }
+
+    /// POST §6.3 accept, treating host backpressure (503 / 429 / 409 / 5xx)
+    /// as "wait, then try again" instead of as a failure. 409 in particular
+    /// is a real race on "Accept all": the host has the offer but has not
+    /// finished hashing the file yet.
+    ///
+    /// Bounded by `backpressureGiveUpSeconds`, and abandoned the moment the
+    /// caller's row disappears.
+    private func acceptWithBackpressure(_ client: SendroClient,
+                                        offer: TransferOffer,
+                                        hostId: String,
+                                        patience: TimeInterval,
+                                        isAlive: @escaping () -> Bool,
+                                        onWaiting: ((HostBusyReason, Int) -> Void)?) async -> AcceptOutcome {
+        let deadline = Date().addingTimeInterval(patience)
+        var attempt = 0
+        while true {
+            guard isAlive() else { return .abandoned }
+            do {
+                try await client.accept(transferId: offer.transferId)
+                // It was ready after all — do not make the download wait out
+                // a cooldown that this very answer just disproved.
+                transferBusyUntil[offer.transferId] = nil
+                transferBusyReason[offer.transferId] = nil
+                return .accepted
+            } catch let error as SendroClientError {
+                guard let status = error.httpStatus else {
+                    return .refused(error.localizedDescription)
+                }
+                guard let info = HostStatus.backpressure(status: status,
+                                                         retryAfterHeader: nil,
+                                                         hostMessage: error.apiMessage) else {
+                    return .refused(HostStatus.failure(status: status,
+                                                       hostMessage: error.apiMessage,
+                                                       hostName: offer.senderName,
+                                                       direction: .incoming).message)
+                }
+                guard Date() < deadline else {
+                    return .refused(info.reason.giveUpMessage(hostName: offer.senderName))
+                }
+                attempt += 1
+                let multiplier = 1 << min(max(attempt - 1, 0), 3)
+                let delay = HostStatus.clampRetryAfter(info.retryAfterSeconds * multiplier)
+                // Hold the download queue back for the same window, so it
+                // does not go and collect the identical refusal.
+                armCooldown(transferId: offer.transferId, hostId: hostId,
+                            reason: info.reason, delay: delay)
+                ensureQueueTicker()
+
+                var remaining = delay
+                while remaining > 0 {
+                    guard isAlive() else { return .abandoned }
+                    onWaiting?(info.reason, remaining)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    remaining -= 1
+                }
+            } catch {
+                // Transport-level (unreachable, timed out) — not a protocol
+                // answer, so the caller decides.
+                return .refused(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Actually open the stream. ONLY `drainQueue()` may call this — it is
+    /// what consumes a slot.
+    private func beginStreaming(offer: TransferOffer, hostId: String) {
         let transferId = offer.transferId
         guard downloads[transferId] == nil else { return }
         guard let client = client(for: hostId) else {
-            setPhase(transferId, .failed(message: "Host is not reachable.", resumable: true))
+            setPhase(transferId, .failed(message: "\(offer.senderName) is not reachable right now.",
+                                         resumable: true))
             return
         }
 
@@ -594,6 +1074,13 @@ final class TransferEngine: ObservableObject {
             client.makeFileRequest(transferId: transferId, rangeStart: rangeStart, sha256: sha256)
         }
 
+        download.onRestartedFromZero = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.setBytes(transferId, 0)
+                self.setNote(transferId, Self.restartNote(hostName: offer.senderName))
+            }
+        }
         download.onBegan = { [weak self] resumedFrom in
             Task { @MainActor in
                 guard let self else { return }
@@ -642,10 +1129,54 @@ final class TransferEngine: ObservableObject {
                                offer: TransferOffer,
                                hostId: String) {
         let transferId = offer.transferId
-        downloads[transferId] = nil
+        downloads[transferId] = nil                 // slot released
         updateIdleTimer()
 
+        // Backpressure is the one outcome that is not the end of anything:
+        // it re-queues, keeps the .part file, and must not touch history,
+        // notifications or the host's failure accounting.
+        if case .backpressure(let info) = outcome {
+            noteBackpressure(offer: offer, hostId: hostId, info: info)
+            pumpQueue()
+            return
+        }
+
+        // Every other outcome means our stream really ended, so a slot on
+        // the host freed as well.
+        noteStreamEnded(hostId)
+        backpressureAttempts[transferId] = nil
+        backpressureSince[transferId] = nil
+        transferBusyUntil[transferId] = nil
+        transferBusyReason[transferId] = nil
+
         switch outcome {
+        case .backpressure:
+            break                                   // handled above
+
+        case .rangeRejected:
+            // 416: the host says our offset is not valid for its file any
+            // more (it changed, or our .part is longer than the source).
+            // Throw the partial away and go round again from byte 0 — same
+            // queue, front of the line, no red screen.
+            try? FileManager.default.removeItem(at: AppPaths.partFileURL(transferId: transferId))
+            setBytes(transferId, 0)
+            setNote(transferId, Self.restartNote(hostName: offer.senderName))
+            sendStatus(hostId, transferId, StatusReport(state: "downloading", bytesReceived: 0))
+            enqueueDownload(offer: offer, hostId: hostId, atFront: true)
+
+        case .httpRefused(let status, let hostMessage):
+            let refusal = HostStatus.failure(status: status,
+                                             hostMessage: hostMessage,
+                                             hostName: offer.senderName,
+                                             direction: .incoming)
+            sendStatus(hostId, transferId,
+                       StatusReport(state: "failed", error: "http \(status)"))
+            setPhase(transferId, .failed(message: refusal.message, resumable: refusal.resumable))
+            LiveActivityController.shared.end(transferId: transferId,
+                                              phase: .failed,
+                                              bytesReceived: activeBytes(transferId))
+            notifier.notifyTransferFailed(fileName: offer.fileName, reason: refusal.message)
+
         case .verified(let fileURL):
             setBytes(transferId, offer.sizeBytes)
             sendStatus(hostId, transferId,
@@ -693,6 +1224,15 @@ final class TransferEngine: ObservableObject {
                                               phase: .failed,
                                               bytesReceived: 0)
         }
+
+        // A slot just freed — start whatever is next in line.
+        pumpQueue()
+    }
+
+    /// Shown whenever the progress ring legitimately rewinds to zero, so a
+    /// restart never reads as a bug.
+    static func restartNote(hostName: String) -> String {
+        "Resuming didn't line up with the copy on \(hostName), so this is downloading again from the start. Nothing is lost — it still has to match the same SHA-256."
     }
 
     private func activeBytes(_ transferId: String) -> Int64 {
@@ -875,7 +1415,7 @@ final class TransferEngine: ObservableObject {
 
     private func upsertActive(offer: TransferOffer, hostId: String, phase: TransferPhase) {
         if let idx = active.firstIndex(where: { $0.id == offer.transferId }) {
-            active[idx].phase = phase
+            active[idx].phase = phase                  // `note` is deliberately kept
         } else {
             active.append(ActiveTransfer(offer: offer,
                                          hostId: hostId,
@@ -895,6 +1435,11 @@ final class TransferEngine: ObservableObject {
         }
     }
 
+    private func setNote(_ transferId: String, _ text: String?) {
+        guard let idx = active.firstIndex(where: { $0.id == transferId }) else { return }
+        if active[idx].note != text { active[idx].note = text }
+    }
+
     private func setBytes(_ transferId: String, _ bytes: Int64) {
         guard let idx = active.firstIndex(where: { $0.id == transferId }) else { return }
         active[idx].bytesReceived = bytes
@@ -902,6 +1447,13 @@ final class TransferEngine: ObservableObject {
 
     private func applyProgress(_ transferId: String, _ update: DownloadTask.ProgressUpdate) {
         guard let idx = active.firstIndex(where: { $0.id == transferId }) else { return }
+        // Real bytes are arriving: whatever backpressure this transfer hit
+        // before is history, so the next 503 (if any) starts from a short
+        // delay again and the give-up clock restarts.
+        if backpressureAttempts[transferId] != nil {
+            backpressureAttempts[transferId] = nil
+            backpressureSince[transferId] = nil
+        }
         active[idx].bytesReceived = update.bytesReceived
         active[idx].speedBytesPerSecond = update.speedBytesPerSecond
         active[idx].etaSeconds = update.etaSeconds
@@ -913,8 +1465,11 @@ final class TransferEngine: ObservableObject {
                                              etaSeconds: update.etaSeconds)
     }
 
+    /// Keep the screen awake while there is anything left to do — including
+    /// files that are only queued or counting down a Retry-After. Letting the
+    /// device sleep mid-batch suspends the app and stalls the whole queue.
     private func updateIdleTimer() {
-        UIApplication.shared.isIdleTimerDisabled = !downloads.isEmpty
+        UIApplication.shared.isIdleTimerDisabled = !downloads.isEmpty || !queue.isEmpty
     }
 
     // MARK: - Status reports (client → host, fire and forget)
@@ -985,6 +1540,15 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
     enum Outcome {
         case verified(fileURL: URL)
         case integrityMismatch
+        /// The host said "later", not "no" (503 / 429 / 409 / other 5xx).
+        /// The .part file is untouched and the transfer is still alive.
+        case backpressure(HostBackpressure)
+        /// 416 — our resume offset is not valid for the host's file any
+        /// more. Start over from byte 0.
+        case rangeRejected
+        /// A real protocol refusal. The engine words it for the user, since
+        /// it is the side that knows the host's name.
+        case httpRefused(status: Int, hostMessage: String?)
         case failed(message: String, resumable: Bool)
         case cancelled
     }
@@ -1003,6 +1567,9 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
 
     // Callbacks (invoked on internal queues — callers hop to MainActor)
     var onBegan: ((Int64) -> Void)?
+    /// The host answered 200 to a ranged request (its copy changed), so the
+    /// .part file was truncated and progress genuinely went back to zero.
+    var onRestartedFromZero: (() -> Void)?
     var onProgress: ((ProgressUpdate) -> Void)?
     var onStatusTick: ((Int64) -> Void)?
     var onVerifying: (() -> Void)?
@@ -1017,6 +1584,13 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
     private var expectedOffset: Int64 = 0
     private var pendingFailure: Outcome?
     private var userCancelled = false
+    /// Set when the host answered with a non-2xx: from that point the body
+    /// is a small JSON error, never file bytes. Bounded — an error body is
+    /// tens of bytes and this must never become a buffering path.
+    private var errorStatus: Int?
+    private var errorRetryAfter: String?
+    private var errorBody = Data()
+    private static let maxErrorBodyBytes = 8 * 1024
     private var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
     private var lastProgressEmit: TimeInterval = 0
     private var lastStatusEmit: TimeInterval = 0
@@ -1129,7 +1703,7 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
         } catch {
             try? fileHandle?.close()
             fileHandle = nil
-            complete(.failed(message: "Could not prepare download: \(error.localizedDescription)",
+            complete(.failed(message: "Couldn't get the file ready on this iPhone: \(error.localizedDescription)",
                              resumable: true))
         }
     }
@@ -1173,29 +1747,56 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
                     hasher = StreamingSHA256()
                     bytesOnDisk = 0
                     expectedOffset = 0
+                    speedSamples.removeAll()
+                    onRestartedFromZero?()
                 } catch {
-                    pendingFailure = .failed(message: "Could not reset partial file.", resumable: false)
+                    pendingFailure = .failed(message: "Couldn't clear the partial file to start over. Remove this transfer and ask for it again.",
+                                             resumable: false)
                     completionHandler(.cancel)
                     return
                 }
             }
             completionHandler(.allow)
         default:
-            let resumable = http.statusCode >= 500
-            pendingFailure = .failed(message: "Host returned HTTP \(http.statusCode).",
-                                     resumable: resumable)
-            completionHandler(.cancel)
+            // Do NOT cancel here. "transfer slots busy" and "transfers
+            // paused" are the same 503 and differ only in the JSON body, so
+            // read the (tiny) body before deciding what this means. The
+            // bytes are diverted away from the .part file and the hasher.
+            errorStatus = http.statusCode
+            errorRetryAfter = http.value(forHTTPHeaderField: "Retry-After")
+            completionHandler(.allow)
         }
+    }
+
+    /// Turn a non-2xx answer into an outcome. Backpressure first — a 503 is
+    /// never a failure — then the stale-range restart, then a real refusal.
+    private static func outcome(forStatus status: Int,
+                                retryAfterHeader: String?,
+                                body: Data) -> Outcome {
+        if status == 416 { return .rangeRejected }
+        if let info = HostStatus.backpressure(status: status,
+                                              retryAfterHeader: retryAfterHeader,
+                                              body: body) {
+            return .backpressure(info)
+        }
+        return .httpRefused(status: status, hostMessage: HostStatus.apiError(in: body)?.message)
     }
 
     func urlSession(_ session: URLSession,
                     dataTask: URLSessionDataTask,
                     didReceive data: Data) {
+        if errorStatus != nil {
+            // Error body, not file bytes: keep a bounded copy and let the
+            // .part file and the running hash alone.
+            let room = Self.maxErrorBodyBytes - errorBody.count
+            if room > 0 { errorBody.append(data.prefix(room)) }
+            return
+        }
         guard pendingFailure == nil else { return }
         do {
             try fileHandle?.write(contentsOf: data)
         } catch {
-            pendingFailure = .failed(message: "Write failed (disk full?): \(error.localizedDescription)",
+            pendingFailure = .failed(message: "Couldn't write to storage — the iPhone may be full. \(error.localizedDescription)",
                                      resumable: true)
             dataTask.cancel()
             return
@@ -1230,6 +1831,14 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
             complete(pending)
             return
         }
+        if let status = errorStatus {
+            // A cancel that raced the error body is still a cancel.
+            complete(userCancelled ? .cancelled
+                                   : Self.outcome(forStatus: status,
+                                                  retryAfterHeader: errorRetryAfter,
+                                                  body: errorBody))
+            return
+        }
         if let error {
             let nsError = error as NSError
             if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
@@ -1241,7 +1850,7 @@ final class DownloadTask: NSObject, URLSessionDataDelegate {
             return
         }
         guard bytesOnDisk == offer.sizeBytes else {
-            complete(.failed(message: "Connection closed early (\(bytesOnDisk)/\(offer.sizeBytes) bytes).",
+            complete(.failed(message: "The connection dropped after \(ByteFormat.string(bytesOnDisk)) of \(ByteFormat.string(offer.sizeBytes)). Resume picks up from exactly there.",
                              resumable: true))
             return
         }

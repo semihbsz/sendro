@@ -46,6 +46,7 @@ import com.sendro.android.core.Format
 import com.sendro.android.core.MediaSaver
 import com.sendro.android.core.SaveMediaMode
 import com.sendro.android.core.UpdateState
+import com.sendro.android.core.host.ReceiverHost
 import com.sendro.android.ui.components.TopInsetSpacer
 import com.sendro.android.ui.components.AccentPill
 import com.sendro.android.ui.components.GhostPill
@@ -70,6 +71,9 @@ fun SettingsScreen(app: SendroApplication, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val settings by app.settings.state.collectAsStateWithLifecycle()
     val network by app.networkWatcher.state.collectAsStateWithLifecycle()
+    val discoveryStatus by app.discovery.status.collectAsStateWithLifecycle()
+    val discoveryDetail by app.discovery.detail.collectAsStateWithLifecycle()
+    val receiverState by app.receiverHost.state.collectAsStateWithLifecycle()
     val paired by app.pairedHosts.hosts.collectAsStateWithLifecycle()
 
     var deviceName by remember(settings.deviceName) { mutableStateOf(settings.deviceName) }
@@ -267,14 +271,49 @@ fun SettingsScreen(app: SendroApplication, onClose: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     DiagnosticLine("Network", network.statusText)
+                    if (!network.hasLocalTransport && network.isConnected) {
+                        DiagnosticLine(
+                            "Warning",
+                            "Sendro only works over Wi-Fi or Ethernet. Join the same " +
+                                "network as the other device.",
+                        )
+                    }
                     DiagnosticLine(
                         "Discovery",
-                        when (app.discovery.status.value) {
+                        when (discoveryStatus) {
                             com.sendro.android.core.Discovery.Status.BROWSING -> "Browsing _sendro._tcp"
                             com.sendro.android.core.Discovery.Status.IDLE -> "Idle"
                             com.sendro.android.core.Discovery.Status.FAILED -> "Unavailable on this device"
                         },
                     )
+                    // A fault the app cannot fix belongs on screen, not in a
+                    // log nobody will read.
+                    discoveryDetail?.let { DiagnosticLine("Discovery note", it) }
+                    when (val host = receiverState) {
+                        is ReceiverHost.State.Running -> {
+                            DiagnosticLine(
+                                "Receiver",
+                                host.addresses.firstOrNull()
+                                    ?.let { "Listening on $it:${host.port}" }
+                                    ?: "Listening on port ${host.port}",
+                            )
+                            DiagnosticLine(
+                                "Announced as",
+                                app.receiverHost.advertisedName
+                                    ?: (app.receiverHost.advertisementProblem ?: "not announced"),
+                            )
+                        }
+                        is ReceiverHost.State.Failed -> DiagnosticLine("Receiver", host.message)
+                        ReceiverHost.State.Stopped -> DiagnosticLine("Receiver", "Off")
+                    }
+                    if (app.foregroundServiceBlocked) {
+                        DiagnosticLine(
+                            "Background",
+                            "Android refused to keep Sendro running in the background. " +
+                                "Open Sendro before a transfer, and allow it to run in the " +
+                                "background in Android's settings.",
+                        )
+                    }
                     DiagnosticLine(
                         "Free space",
                         app.transferEngine.freeBytes()?.let { Format.bytes(it) } ?: "unknown",

@@ -22,9 +22,13 @@ import com.sendro.android.core.SendroJson
 import com.sendro.android.core.SendroMessage
 import com.sendro.android.core.SettingsStore
 import com.sendro.android.core.toHexLower
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import java.security.MessageDigest
@@ -44,6 +48,8 @@ import java.util.UUID
  */
 class ReceiverHost(
     private val context: Context,
+    /** The application scope: the rebind watchdog outlives any screen. */
+    private val scope: CoroutineScope,
     private val settings: SettingsStore,
     private val paths: AppPaths,
     private val mediaSaver: MediaSaver,
@@ -69,10 +75,26 @@ class ReceiverHost(
     private val lock = Any()
     private var server: HttpServer? = null
 
+    /** True between [start] and [stop]; what the watchdog compares against. */
+    private var shouldListen = false
+    private var watchdogStarted = false
+
     val isRunning: Boolean get() = _state.value is State.Running
 
     /** The port actually bound, or the default when stopped. */
     val port: Int get() = (_state.value as? State.Running)?.port ?: DEFAULT_PORT
+
+    /** The name mDNS actually published, or null when it is not advertising. */
+    val advertisedName: String? get() = advertiser.registeredName
+
+    /**
+     * Null when the advertisement is up; otherwise a sentence explaining why
+     * this device will not appear in another device's list. Surfaced in
+     * diagnostics because it is the one receiver-side fault the app cannot fix
+     * for itself — the fallback is pairing by IP address.
+     */
+    val advertisementProblem: String?
+        get() = if (advertiser.registeredName != null) null else advertiser.lastError
 
     val deviceId: String get() = settings.clientDeviceId
     val deviceName: String get() = settings.current.deviceName
@@ -83,12 +105,22 @@ class ReceiverHost(
     // -----------------------------------------------------------------------
 
     fun start() {
+        startWatchdog()
         synchronized(lock) {
+            shouldListen = true
             if (server?.isRunning == true) return
             // Single-use: a stopped HttpServer has shut its worker pool down.
-            val fresh = HttpServer(DEFAULT_PORT, PORT_SCAN_RANGE) { request -> route(request) }
+            val fresh = HttpServer(
+                requestedPort = DEFAULT_PORT,
+                portScanRange = PORT_SCAN_RANGE,
+                onDied = ::onServerDied,
+                handler = { request -> route(request) },
+            )
             if (!fresh.start()) {
-                _state.value = State.Failed("No free port in $DEFAULT_PORT..${DEFAULT_PORT + PORT_SCAN_RANGE}")
+                _state.value = State.Failed(
+                    "Every port from $DEFAULT_PORT to ${DEFAULT_PORT + PORT_SCAN_RANGE} is in " +
+                        "use. Close whatever is using them, or restart this device.",
+                )
                 onStateChanged()
                 return
             }
@@ -101,6 +133,7 @@ class ReceiverHost(
 
     fun stop() {
         synchronized(lock) {
+            shouldListen = false
             advertiser.unregister()
             server?.stop()
             server = null
@@ -111,16 +144,90 @@ class ReceiverHost(
     }
 
     /**
-     * A network change invalidates both the advertisement (it is bound to the
-     * old interface) and the addresses shown on the pairing screen. The socket
-     * itself is bound to 0.0.0.0 and survives, so only mDNS is redone.
+     * A network change invalidates the advertisement (it is bound to the old
+     * interface) and the addresses shown on the pairing screen.
+     *
+     * The listening socket is bound to 0.0.0.0 and normally survives an
+     * interface change, so mDNS alone is redone — but if the socket did die
+     * with it, or the last bind failed outright, this is also the moment to
+     * take another run at binding.
      */
     fun onNetworkChanged() {
+        val needsRebind = synchronized(lock) {
+            shouldListen && server?.isRunning != true
+        }
+        if (needsRebind) {
+            rebind()
+            return
+        }
         synchronized(lock) {
             val running = _state.value as? State.Running ?: return
             _state.value = State.Running(running.port, Advertiser.localIpv4Addresses())
         }
         advertise()
+    }
+
+    /**
+     * The accept loop gave up on a socket that would not recover. Rebuild it
+     * rather than leaving the UI claiming to be listening on a dead port.
+     */
+    private fun onServerDied() {
+        Log.w(TAG, "listening socket died; rebinding")
+        synchronized(lock) {
+            if (!shouldListen) return
+            _state.value = State.Failed("The listening socket dropped — reopening it…")
+        }
+        onStateChanged()
+        scope.launch {
+            delay(REBIND_DELAY_MS)
+            rebind()
+        }
+    }
+
+    private fun rebind() {
+        synchronized(lock) {
+            if (!shouldListen) return
+            advertiser.unregister()
+            server?.stop()
+            server = null
+        }
+        start()
+    }
+
+    /**
+     * The honest way to notice a host that is "running" but is not.
+     *
+     * There is no callback for a socket the system quietly reclaimed while the
+     * app was frozen, so this compares intent against reality every
+     * [WATCHDOG_INTERVAL_MS] and rebinds when they disagree. It is also what
+     * recovers a bind that failed at boot because the interface was not up
+     * yet — the single most common TV symptom.
+     */
+    private fun startWatchdog() {
+        synchronized(lock) {
+            if (watchdogStarted) return
+            watchdogStarted = true
+        }
+        scope.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val broken = synchronized(lock) { shouldListen && server?.isRunning != true }
+                if (broken) {
+                    Log.i(TAG, "watchdog: receiver host is not listening, rebinding")
+                    rebind()
+                    continue
+                }
+                // A registration that failed (interface not ready at boot,
+                // another Sendro holding the name) leaves us listening but
+                // undiscoverable. Re-register until it takes.
+                val advertising = advertiser.registeredName != null
+                val listening = synchronized(lock) { _state.value is State.Running }
+                if (listening && !advertising) {
+                    Log.i(TAG, "watchdog: not advertising, re-registering mDNS")
+                    advertise()
+                }
+            }
+        }
     }
 
     private fun advertise() {
@@ -458,6 +565,12 @@ class ReceiverHost(
         const val DEFAULT_PORT = 48800
         const val PORT_SCAN_RANGE = 20
         private const val STORAGE_MARGIN_BYTES = 200L * 1024 * 1024
+
+        /** Breathing room before rebinding a socket that just died. */
+        private const val REBIND_DELAY_MS = 1_000L
+
+        /** How often intent ("should be listening") is checked against reality. */
+        private const val WATCHDOG_INTERVAL_MS = 20_000L
 
         /**
          * Decodes the §7 / §8 `X-Sendro-File-Name` header.

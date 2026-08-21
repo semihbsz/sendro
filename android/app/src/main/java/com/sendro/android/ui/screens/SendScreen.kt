@@ -606,6 +606,8 @@ private fun UploadRow(item: UploadItem, onCancel: () -> Unit, onRetry: () -> Uni
                 Text(
                     text = when (val phase = item.phase) {
                         UploadPhase.Queued -> "Waiting…"
+                        // The host asked us to wait — say so, and count down.
+                        is UploadPhase.HostBusy -> phase.label
                         UploadPhase.Hashing -> "Hashing SHA-256…"
                         UploadPhase.Uploading ->
                             "${Format.bytes(item.bytesSent)} / ${Format.bytes(item.sizeBytes)}" +
@@ -615,20 +617,25 @@ private fun UploadRow(item: UploadItem, onCancel: () -> Unit, onRetry: () -> Uni
                         is UploadPhase.Failed -> phase.message
                     },
                     style = Sendro.mono(10.5f),
-                    color = if (item.phase is UploadPhase.Failed) Sendro.danger
-                    else Sendro.textTertiary,
+                    color = when (item.phase) {
+                        is UploadPhase.Failed -> Sendro.danger
+                        is UploadPhase.HostBusy -> Sendro.warn
+                        else -> Sendro.textTertiary
+                    },
                     maxLines = 2,
                 )
             }
             StatusChip(
-                text = item.phase.label,
+                text = item.phase.shortLabel,
                 color = when (item.phase) {
                     UploadPhase.Done -> Sendro.teal
                     is UploadPhase.Failed -> Sendro.danger
+                    // Amber: waiting on the PC is not an error.
+                    is UploadPhase.HostBusy -> Sendro.warn
                     else -> Sendro.iris
                 },
             )
-            if (item.phase is UploadPhase.Failed) {
+            if (item.phase is UploadPhase.Failed || item.phase is UploadPhase.HostBusy) {
                 Pressable(onClick = onRetry) {
                     Icon(
                         Icons.Filled.Refresh,

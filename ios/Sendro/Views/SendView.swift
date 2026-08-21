@@ -667,6 +667,13 @@ struct UploadRow: View {
             Text("Waiting…")
                 .font(Theme.mono(10.5))
                 .foregroundColor(Theme.textTertiary)
+        case .waitingForHost(let reason, let seconds):
+            // Calm, never red: the host asked us to come back, that's all.
+            Text("\(reason.headline(hostName: item.hostName)) — retrying in \(seconds)s")
+                .font(Theme.mono(10.5))
+                .foregroundColor(Theme.warn)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         case .hashing:
             Text("Hashing SHA-256…")
                 .font(Theme.mono(10.5))
@@ -704,6 +711,28 @@ struct UploadRow: View {
     @ViewBuilder
     private var trailingControl: some View {
         switch item.phase {
+        case .waitingForHost:
+            HStack(spacing: 6) {
+                Button(action: onRetry) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.warn)
+                        .frame(width: 30, height: 30)
+                        .glassRow(cornerRadius: 15, fillOpacity: 0.06, borderOpacity: 0.1)
+                }
+                .buttonStyle(PressableButtonStyle())
+                .accessibilityLabel("Try sending now")
+
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.textBase.opacity(0.55))
+                        .frame(width: 30, height: 30)
+                        .glassRow(cornerRadius: 15, fillOpacity: 0.06, borderOpacity: 0.1)
+                }
+                .buttonStyle(PressableButtonStyle())
+                .accessibilityLabel("Cancel upload")
+            }
         case .queued, .hashing, .uploading:
             Button(action: onCancel) {
                 Image(systemName: "xmark")

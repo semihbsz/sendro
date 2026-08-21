@@ -19,12 +19,16 @@ data class NetworkState(
     /** Bumped on every meaningful transport change (including the first). */
     val changeToken: Int = 0,
 ) {
+    /** Wi-Fi or Ethernet: the only two transports a LAN transfer can use. */
+    val hasLocalTransport: Boolean get() = isWifi || isEthernet
+
     val statusText: String
         get() = when {
             !isConnected -> "No network connection"
+            isWifi && isEthernet -> "Connected via Wi-Fi and Ethernet"
             isWifi -> "Connected via Wi-Fi"
             isEthernet -> "Connected via Ethernet"
-            isCellular -> "Connected via cellular"
+            isCellular -> "Cellular only — Sendro needs Wi-Fi or Ethernet"
             else -> "Connected (interface unknown)"
         }
 }
@@ -41,6 +45,18 @@ data class NetworkState(
  *
  * Note it registers a *callback*, not a broadcast receiver:
  * CONNECTIVITY_ACTION is deprecated and unreliable from API 28.
+ *
+ * Two things here are deliberate and were both bugs before:
+ *
+ *  - The request does NOT ask for `NET_CAPABILITY_INTERNET`. Sendro's whole
+ *    job is a LAN, and a router with no upstream — or a PC hotspot, or a TV on
+ *    an isolated switch — never gains that capability, so a callback that
+ *    required it simply never fired and network changes went unnoticed.
+ *  - Transports are computed across EVERY network the callback knows about,
+ *    not just `activeNetwork`. Android makes a validated cellular link the
+ *    active network whenever Wi-Fi has no internet, which is exactly the
+ *    situation Sendro is designed for; reading only the active network made
+ *    the app report "cellular" while sitting on the PC's Wi-Fi.
  */
 class NetworkWatcher(context: Context) {
 
@@ -54,11 +70,27 @@ class NetworkWatcher(context: Context) {
     private var lastSignature: String? = null
     private var registered = false
 
+    /** Every network the system currently has, not just the default route. */
+    private val seen = LinkedHashMap<Network, NetworkCapabilities>()
+
     private val callback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) = refresh()
-        override fun onLost(network: Network) = refresh()
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = refresh()
-        override fun onUnavailable() = refresh()
+        override fun onAvailable(network: Network) {
+            refresh()
+        }
+
+        override fun onLost(network: Network) {
+            synchronized(seen) { seen.remove(network) }
+            refresh()
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            synchronized(seen) { seen[network] = caps }
+            refresh()
+        }
+
+        override fun onUnavailable() {
+            refresh()
+        }
     }
 
     @Synchronized
@@ -66,7 +98,8 @@ class NetworkWatcher(context: Context) {
         if (registered) return
         val manager = connectivity ?: return
         val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            // No NET_CAPABILITY_INTERNET: see the class doc. A LAN with no
+            // upstream is the normal case, not an edge case.
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -84,20 +117,38 @@ class NetworkWatcher(context: Context) {
     }
 
     /**
-     * Recompute from the *active* network rather than the callback's argument:
-     * during a handover several networks are momentarily available and only
-     * the active one describes what a socket will actually use.
+     * Recompute across every known network.
+     *
+     * The active network still decides "metered", because that is genuinely a
+     * property of the default route — but which transports EXIST is what
+     * matters for a LAN app, and that is the union.
      */
     @Synchronized
     fun refresh() {
         val manager = connectivity
         val active = manager?.activeNetwork
-        val caps = active?.let { manager.getNetworkCapabilities(it) }
+        val activeCaps = active?.let { manager.getNetworkCapabilities(it) }
 
-        val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        val ethernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
-        val cellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
-        val connected = caps != null
+        // Refresh the cached capabilities of the active network too: on a cold
+        // start no callback has fired yet and `seen` is empty.
+        if (active != null && activeCaps != null) {
+            synchronized(seen) { seen[active] = activeCaps }
+        }
+        val all = synchronized(seen) {
+            // Drop anything the system no longer knows about: onLost is not
+            // guaranteed to arrive after a process freeze, and a stale entry
+            // would keep claiming the device is on Wi-Fi forever.
+            if (manager != null) {
+                val dead = seen.keys.filter { manager.getNetworkCapabilities(it) == null }
+                dead.forEach { seen.remove(it) }
+            }
+            seen.values.toList()
+        }
+
+        val wifi = all.any { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) }
+        val ethernet = all.any { it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) }
+        val cellular = all.any { it.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) }
+        val connected = all.isNotEmpty()
         val metered = manager?.isActiveNetworkMetered == true
 
         val signature = "$connected|$wifi|$ethernet|$cellular"

@@ -5,7 +5,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.decodeFromString
 import okhttp3.OkHttpClient
 import java.io.File
 import java.io.RandomAccessFile
@@ -28,6 +27,8 @@ class DownloadTask(
     private val offer: TransferOffer,
     private val partFile: File,
     private val client: SendroClient,
+    /** The sending device's own name, so every message can name it. */
+    private val peerName: String,
     private val http: OkHttpClient = SendroClient.Clients.transfer,
 ) {
 
@@ -37,6 +38,32 @@ class DownloadTask(
 
         /** Streamed fully, digest did NOT match. The temp file is deleted. */
         data object IntegrityMismatch : Outcome
+
+        /**
+         * The host is refusing work right now and told us when to come back
+         * (`503` + `Retry-After`, from the concurrency gate or from Pause).
+         *
+         * NOT a failure. It is the single most important distinction in this
+         * file: without it, accepting a batch of files turns the host's
+         * correct backpressure into a screen full of red.
+         */
+        data class Busy(
+            val reason: BusyReason,
+            val retryAfterSeconds: Int?,
+            val message: String,
+        ) : Outcome
+
+        /** `409` — the host is not ready for this specific transfer yet. */
+        data class NotReady(val message: String, val retryAfterSeconds: Int?) : Outcome
+
+        /**
+         * `416` — our resume offset does not line up with the host's file.
+         * The partial has already been discarded; the caller just restarts.
+         */
+        data class RangeMismatch(val message: String) : Outcome
+
+        /** The pairing or the transfer is gone; retrying cannot help. */
+        data class Unrecoverable(val message: String) : Outcome
 
         data class Failed(val message: String, val resumable: Boolean) : Outcome
     }
@@ -68,9 +95,27 @@ class DownloadTask(
             download(onBegan, onProgress, onVerifying)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: SendroHttpException) {
+            Log.w(TAG, "download rejected for ${offer.transferId}", e)
+            val text = e.explain(peerName, receiving = true)
+            when (e.disposition) {
+                HttpDisposition.BACKPRESSURE ->
+                    Outcome.Busy(e.busyReason, e.retryAfterSeconds, text)
+                HttpDisposition.RETRY_SOON -> Outcome.NotReady(text, e.retryAfterSeconds)
+                HttpDisposition.RANGE_MISMATCH -> Outcome.RangeMismatch(text)
+                HttpDisposition.UNAUTHORIZED, HttpDisposition.GONE -> Outcome.Unrecoverable(text)
+                HttpDisposition.INTEGRITY -> Outcome.IntegrityMismatch
+                HttpDisposition.FATAL -> Outcome.Failed(text, resumable = false)
+                HttpDisposition.HOST_ERROR -> Outcome.Failed(text, resumable = true)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "download failed for ${offer.transferId}", e)
-            Outcome.Failed(e.sendroMessage(), resumable = true)
+            // A transport error (socket closed, Wi-Fi blip). Always resumable:
+            // the partial is on disk and the host still has the file.
+            Outcome.Failed(
+                "Lost the connection to $peerName — it will pick up where it stopped.",
+                resumable = true,
+            )
         }
     }
 
@@ -131,26 +176,39 @@ class DownloadTask(
                 }
                 416 -> {
                     // Our offset is past the end — the file on the host is
-                    // smaller than our partial. Drop it and let the caller
-                    // retry from scratch.
+                    // smaller than our partial. Drop it and start over; no
+                    // bytes are lost because the host still has the file.
                     RandomAccessFile(partFile, "rw").use { it.setLength(0) }
-                    return Outcome.Failed(
-                        "The file on the PC changed while transferring. Retry to start over.",
-                        resumable = true,
+                    return Outcome.RangeMismatch(
+                        HttpSemantics.explain(416, null, peerName, receiving = true),
                     )
                 }
                 else -> {
                     val body = runCatching { r.body?.string().orEmpty() }.getOrDefault("")
-                    val parsed = runCatching { SendroJson.decodeFromString<ApiError>(body) }.getOrNull()
-                    return Outcome.Failed(
-                        parsed?.message ?: "Host returned HTTP ${r.code}.",
-                        // 5xx and 408 are worth retrying; 401/403/404/410 are not.
-                        resumable = r.code >= 500 || r.code == 408,
-                    )
+                    val error = errorFor(r.code, body, r.header("Retry-After"))
+                    val text = error.explain(peerName, receiving = true)
+                    return when (error.disposition) {
+                        HttpDisposition.BACKPRESSURE -> Outcome.Busy(
+                            reason = error.busyReason,
+                            retryAfterSeconds = error.retryAfterSeconds,
+                            message = text,
+                        )
+                        HttpDisposition.RETRY_SOON ->
+                            Outcome.NotReady(text, error.retryAfterSeconds)
+                        HttpDisposition.RANGE_MISMATCH -> Outcome.RangeMismatch(text)
+                        HttpDisposition.UNAUTHORIZED, HttpDisposition.GONE ->
+                            Outcome.Unrecoverable(text)
+                        HttpDisposition.INTEGRITY -> Outcome.IntegrityMismatch
+                        HttpDisposition.HOST_ERROR -> Outcome.Failed(text, resumable = true)
+                        HttpDisposition.FATAL -> Outcome.Failed(text, resumable = false)
+                    }
                 }
             }
 
-            val body = r.body ?: return Outcome.Failed("Host sent no body.", resumable = true)
+            val body = r.body ?: return Outcome.Failed(
+                "$peerName sent an empty response — trying again.",
+                resumable = true,
+            )
 
             RandomAccessFile(partFile, "rw").use { raf ->
                 raf.seek(written)
@@ -183,7 +241,8 @@ class DownloadTask(
 
             if (offer.sizeBytes > 0 && written != offer.sizeBytes) {
                 return Outcome.Failed(
-                    "Connection closed early ($written/${offer.sizeBytes} bytes).",
+                    "The connection dropped part-way through — it will pick up from " +
+                        "${Format.bytes(written)}.",
                     resumable = true,
                 )
             }

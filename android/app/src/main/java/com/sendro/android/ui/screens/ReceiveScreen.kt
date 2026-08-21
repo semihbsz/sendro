@@ -671,10 +671,19 @@ fun ActiveRow(transfer: ActiveTransfer, onClick: () -> Unit) {
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = "${Format.bytes(transfer.bytesReceived)} / " +
-                            Format.bytes(transfer.offer.sizeBytes),
+                        // A waiting transfer says why it is waiting; "0 B /
+                        // 1.4 GB" for ten minutes reads like a stall.
+                        text = if (transfer.phase.isPending) {
+                            transfer.phase.label
+                        } else {
+                            "${Format.bytes(transfer.bytesReceived)} / " +
+                                Format.bytes(transfer.offer.sizeBytes)
+                        },
                         style = Sendro.mono(10.5f),
-                        color = Sendro.textTertiary,
+                        color = if (transfer.phase is TransferPhase.HostBusy) Sendro.warn
+                        else Sendro.textTertiary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 StatusChip(transfer.phase.shortLabel, phaseColor(transfer.phase))
@@ -685,6 +694,10 @@ fun ActiveRow(transfer: ActiveTransfer, onClick: () -> Unit) {
 }
 
 fun phaseColor(phase: TransferPhase): Color = when (phase) {
+    // Waiting for a slot is a normal, healthy state: dim, not coloured.
+    is TransferPhase.Queued -> Sendro.textSecondaryStatic
+    // The host asked us to come back later. Amber — a warning, never an error.
+    is TransferPhase.HostBusy -> Sendro.warn
     TransferPhase.Preparing, TransferPhase.Downloading -> Sendro.iris
     TransferPhase.Verifying, TransferPhase.Saving -> Sendro.teal
     TransferPhase.AwaitingSaveChoice -> Sendro.irisSoft

@@ -413,6 +413,15 @@ fun ReceiverStatusLine(app: SendroApplication, modifier: Modifier = Modifier) {
                     style = Sendro.sans(12.5f),
                     color = Sendro.textTertiary,
                 )
+                // Listening but invisible is the worst failure this feature
+                // has, because everything looks fine. Say it out loud.
+                app.receiverHost.advertisementProblem?.let { problem ->
+                    Text(
+                        text = "Not announcing itself on the network. $problem",
+                        style = Sendro.sans(12.5f),
+                        color = Sendro.warn,
+                    )
+                }
             }
 
             is ReceiverHost.State.Failed -> {

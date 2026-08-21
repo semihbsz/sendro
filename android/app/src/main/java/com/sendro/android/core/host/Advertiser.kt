@@ -44,6 +44,16 @@ class Advertiser(context: Context) {
     var registeredName: String? = null
         private set
 
+    /**
+     * Why the advertisement is not up, in a sentence, for the diagnostics
+     * panel. mDNS registration failing at boot (the interface is often not
+     * ready yet on a TV) used to be completely invisible: the app said "Ready
+     * to receive" and no phone could ever find it.
+     */
+    @Volatile
+    var lastError: String? = null
+        private set
+
     @Synchronized
     fun register(instanceName: String, port: Int, deviceId: String, deviceName: String, platform: String) {
         val manager = nsdManager ?: return
@@ -65,12 +75,18 @@ class Advertiser(context: Context) {
         val registration = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
                 registeredName = serviceInfo.serviceName
+                lastError = null
                 Log.i(TAG, "advertising ${serviceInfo.serviceName} on $port")
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "registration failed: $errorCode")
                 registeredName = null
+                lastError = failureText(errorCode)
+                // Never registered, so there is nothing to unregister later:
+                // holding on to this listener would make the next attempt
+                // throw before it even tried.
+                dropListener(this)
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
@@ -97,6 +113,23 @@ class Advertiser(context: Context) {
         listener = null
         registeredName = null
         releaseMulticastLock()
+    }
+
+    /** Forget [candidate] if it is still the live listener. */
+    @Synchronized
+    private fun dropListener(candidate: NsdManager.RegistrationListener) {
+        if (listener !== candidate) return
+        listener = null
+    }
+
+    private fun failureText(errorCode: Int): String = when (errorCode) {
+        // NsdManager.FAILURE_ALREADY_ACTIVE
+        3 -> "Another Sendro advertisement is still being torn down. Retrying…"
+        // NsdManager.FAILURE_MAX_LIMIT
+        4 -> "The system's mDNS service is out of slots. Restart this device, " +
+            "or pair from the phone using this device's IP address."
+        else -> "This device could not announce itself on the network. " +
+            "Pair using its IP address, shown above."
     }
 
     private fun acquireMulticastLock() {

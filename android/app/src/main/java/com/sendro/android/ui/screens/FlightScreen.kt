@@ -300,6 +300,60 @@ private fun InFlightBody(
                 }
             }
 
+            // The host said "not now". Amber copy, a way to skip the wait,
+            // and a cancel — but never the word "failed", because it hasn't.
+            is TransferPhase.HostBusy -> {
+                Text(
+                    text = phase.label,
+                    style = Sendro.sans(13f),
+                    color = Sendro.warn,
+                    textAlign = TextAlign.Center,
+                )
+                Row(
+                    modifier = Modifier.focusGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    AccentPill(
+                        title = "Try now",
+                        onClick = { app.transferEngine.resume(transfer.id) },
+                        color = Sendro.warn,
+                        focusRequester = primaryFocus,
+                        modifier = Modifier.weight(1f),
+                    )
+                    GhostPill(
+                        title = "Cancel",
+                        onClick = {
+                            app.transferEngine.cancel(transfer.id)
+                            onClose()
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+
+            is TransferPhase.Queued -> {
+                Text(
+                    text = if (phase.position > 1) {
+                        "Waiting for a free slot — ${phase.position} in line. " +
+                            "It starts by itself."
+                    } else {
+                        "Waiting for a free slot. It starts by itself."
+                    },
+                    style = Sendro.sans(13f),
+                    color = Sendro.textSecondary,
+                    textAlign = TextAlign.Center,
+                )
+                GhostPill(
+                    title = "Cancel transfer",
+                    onClick = {
+                        app.transferEngine.cancel(transfer.id)
+                        onClose()
+                    },
+                    textColor = Sendro.danger,
+                    focusRequester = primaryFocus,
+                )
+            }
+
             TransferPhase.Interrupted -> {
                 Row(
                     modifier = Modifier.focusGroup(),
@@ -447,12 +501,16 @@ private fun ProgressRing(
 /** Prep · Stream · Verify · Save, with the reached ones lit. */
 @Composable
 private fun PhaseRail(phase: TransferPhase) {
-    val steps = listOf("Prep", "Stream", "Verify", "Save")
+    // "Queue" leads the rail so a transfer that is merely waiting for a slot
+    // lights the first pip and nothing else. Lighting "Stream" for something
+    // that has not moved a byte would be the UI telling a lie.
+    val steps = listOf("Queue", "Prep", "Stream", "Verify", "Save")
     val reached = when (phase) {
-        TransferPhase.Preparing, TransferPhase.Interrupted -> 0
-        TransferPhase.Downloading -> 1
-        TransferPhase.Verifying -> 2
-        TransferPhase.Saving, TransferPhase.AwaitingSaveChoice, TransferPhase.StorageDenied -> 3
+        is TransferPhase.Queued, is TransferPhase.HostBusy -> 0
+        TransferPhase.Preparing, TransferPhase.Interrupted -> 1
+        TransferPhase.Downloading -> 2
+        TransferPhase.Verifying -> 3
+        TransferPhase.Saving, TransferPhase.AwaitingSaveChoice, TransferPhase.StorageDenied -> 4
         is TransferPhase.Failed -> -1
     }
     Row(

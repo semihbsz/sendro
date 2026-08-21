@@ -10,6 +10,11 @@
 //  §7 has NO ranged upload: a retry after failure or an integrity reject
 //  always restarts the stream from byte 0. Acceptable for v1 on a LAN.
 //
+//  Backpressure: a receiving host can answer 503 (Retry-After) when it is
+//  paused or out of connection/guest slots — see core/src/link.rs. That is
+//  never surfaced as a failure here; the item parks with a countdown and the
+//  (still strictly sequential) queue holds for that host until it expires.
+//
 //  Threading model mirrors TransferEngine: the engine is @MainActor and all
 //  published state mutates on main; hashing runs on a detached utility task;
 //  each UploadRunner owns a private URLSession with a serial delegate queue
@@ -23,6 +28,9 @@ import Combine
 
 enum UploadPhase: Equatable {
     case queued
+    /// The receiving host answered with backpressure (503 / 429 / 409 /
+    /// other 5xx). Counting down to the next attempt — NOT a failure.
+    case waitingForHost(reason: HostBusyReason, secondsRemaining: Int)
     case hashing                    // streaming SHA-256 before the POST
     case uploading
     case done                       // server answered 200 → hash verified
@@ -30,11 +38,12 @@ enum UploadPhase: Equatable {
 
     var label: String {
         switch self {
-        case .queued:    return "Waiting"
-        case .hashing:   return "Hashing"
-        case .uploading: return "Sending"
-        case .done:      return "Landed"
-        case .failed:    return "Failed"
+        case .queued:         return "Waiting"
+        case .waitingForHost: return "Waiting"
+        case .hashing:        return "Hashing"
+        case .uploading:      return "Sending"
+        case .done:           return "Landed"
+        case .failed:         return "Failed"
         }
     }
 }
@@ -111,6 +120,20 @@ final class UploadEngine: ObservableObject {
     private var runner: UploadRunner?
     private var currentId: String?
 
+    /// Per-host cooldown after backpressure. The queue stays sequential —
+    /// this just stops it walking to the next file for the same host only to
+    /// collect the same 503.
+    private var hostBusyUntil: [String: Date] = [:]
+    private var hostBusyReason: [String: HostBusyReason] = [:]
+    private var backpressureAttempts: [String: Int] = [:]
+    private var backpressureSince: [String: Date] = [:]
+    /// One 1 Hz tick driving every countdown, alive only while one exists.
+    private var ticker: Task<Void, Never>?
+
+    /// Same patience as the receive side: ten minutes of "the host is busy"
+    /// before an upload is parked as a (retryable) failure.
+    static let backpressureGiveUpSeconds: TimeInterval = 10 * 60
+
     nonisolated init(paired: PairedHostStore, history: HistoryStore) {
         self.paired = paired
         self.history = history
@@ -161,13 +184,26 @@ final class UploadEngine: ObservableObject {
     }
 
     /// §7 has no ranged upload — a retry restarts the stream from byte 0.
+    /// Also serves as "try now" on a row that is counting down a Retry-After.
     func retry(itemId: String) {
         guard let idx = items.firstIndex(where: { $0.id == itemId }) else { return }
-        guard case .failed = items[idx].phase else { return }
+        switch items[idx].phase {
+        case .failed, .waitingForHost:
+            break
+        default:
+            return
+        }
+        // An explicit tap means now: drop the accumulated delay and the
+        // host's cooldown.
+        backpressureAttempts[itemId] = nil
+        backpressureSince[itemId] = nil
+        hostBusyUntil[items[idx].hostId] = nil
+        hostBusyReason[items[idx].hostId] = nil
         items[idx].phase = .queued
         items[idx].bytesSent = 0
         items[idx].speedBytesPerSecond = 0
         items[idx].etaSeconds = nil
+        ensureTicker()          // siblings of the same host still need a tick
         pump()
     }
 
@@ -182,7 +218,17 @@ final class UploadEngine: ObservableObject {
 
     private func pump() {
         guard currentId == nil else { return }
-        guard let idx = items.firstIndex(where: { $0.phase == .queued }) else { return }
+        let now = Date()
+        guard let idx = items.firstIndex(where: { item in
+            guard item.phase == .queued else { return false }
+            // Host asked us to come back later — leave every one of its
+            // files parked instead of collecting a 503 per file.
+            if let until = hostBusyUntil[item.hostId], until > now { return false }
+            return true
+        }) else {
+            ensureTicker()
+            return
+        }
         let item = items[idx]
         currentId = item.id
         if let sha = item.sha256 {
@@ -241,7 +287,8 @@ final class UploadEngine: ObservableObject {
                                                contentLength: items[idx].sizeBytes)
         let uploadRunner = UploadRunner(request: request,
                                         fileURL: items[idx].fileURL,
-                                        totalBytes: items[idx].sizeBytes)
+                                        totalBytes: items[idx].sizeBytes,
+                                        hostName: items[idx].hostName)
         uploadRunner.onProgress = { [weak self] sent, speed, eta in
             Task { @MainActor in
                 self?.applyProgress(itemId: itemId, sent: sent, speed: speed, eta: eta)
@@ -258,6 +305,12 @@ final class UploadEngine: ObservableObject {
 
     private func applyProgress(itemId: String, sent: Int64, speed: Double, eta: Int?) {
         guard let idx = items.firstIndex(where: { $0.id == itemId }) else { return }
+        // Bytes are moving: the host is not busy any more, so the next
+        // backpressure (if any) starts from a short delay again.
+        if backpressureAttempts[itemId] != nil {
+            backpressureAttempts[itemId] = nil
+            backpressureSince[itemId] = nil
+        }
         items[idx].bytesSent = sent
         items[idx].speedBytesPerSecond = speed
         items[idx].etaSeconds = eta
@@ -291,6 +344,11 @@ final class UploadEngine: ObservableObject {
             items[idx].speedBytesPerSecond = 0
             items[idx].etaSeconds = nil
 
+        case .backpressure(let info):
+            // Never a failure: park this one with a countdown and hold the
+            // whole (sequential) queue for that host until it expires.
+            noteBackpressure(itemId: itemId, idx: idx, info: info)
+
         case .failed(let message):
             items[idx].phase = .failed(message: message)
             items[idx].speedBytesPerSecond = 0
@@ -305,6 +363,88 @@ final class UploadEngine: ObservableObject {
 
     private func finishCurrent() {
         currentId = nil
+        pump()
+    }
+
+    // MARK: Host backpressure (§7 has no Range, so a retry is a fresh POST)
+
+    private func noteBackpressure(itemId: String, idx: Int, info: HostBackpressure) {
+        let hostId = items[idx].hostId
+        let hostName = items[idx].hostName
+        let attempts = (backpressureAttempts[itemId] ?? 0) + 1
+        backpressureAttempts[itemId] = attempts
+        let since = backpressureSince[itemId] ?? Date()
+        backpressureSince[itemId] = since
+
+        items[idx].bytesSent = 0
+        items[idx].speedBytesPerSecond = 0
+        items[idx].etaSeconds = nil
+
+        // Give up only after a long stretch, and only into a retryable state.
+        if Date().timeIntervalSince(since) > Self.backpressureGiveUpSeconds {
+            backpressureAttempts[itemId] = nil
+            backpressureSince[itemId] = nil
+            items[idx].phase = .failed(message: info.reason.giveUpMessage(hostName: hostName))
+            return
+        }
+
+        // Exponential-ish, floored by the host's Retry-After, capped at 30 s.
+        let multiplier = 1 << min(max(attempts - 1, 0), 3)
+        let delay = HostStatus.clampRetryAfter(info.retryAfterSeconds * multiplier)
+        let until = Date().addingTimeInterval(TimeInterval(delay))
+        if (hostBusyUntil[hostId] ?? .distantPast) < until { hostBusyUntil[hostId] = until }
+        hostBusyReason[hostId] = info.reason
+        items[idx].phase = .waitingForHost(reason: info.reason, secondsRemaining: delay)
+        ensureTicker()
+    }
+
+    /// True while any row is showing a countdown. Used for ticker liveness:
+    /// clearing a host cooldown by hand must not strand that host's other
+    /// waiting rows with no tick left to release them.
+    private var hasWaitingItems: Bool {
+        items.contains { item in
+            if case .waitingForHost = item.phase { return true }
+            return false
+        }
+    }
+
+    private func ensureTicker() {
+        guard ticker == nil, !hostBusyUntil.isEmpty || hasWaitingItems else { return }
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                guard let self else { return }
+                self.tick()
+                if self.hostBusyUntil.isEmpty && !self.hasWaitingItems {
+                    self.ticker = nil
+                    return
+                }
+            }
+        }
+    }
+
+    /// Expire finished cooldowns, refresh every visible countdown, then pump.
+    private func tick() {
+        let now = Date()
+        // Snapshot the keys: the dictionary is mutated inside the loop.
+        let expired = hostBusyUntil.compactMap { $0.value <= now ? $0.key : nil }
+        for hostId in expired {
+            hostBusyUntil[hostId] = nil
+            hostBusyReason[hostId] = nil
+        }
+        for idx in items.indices {
+            guard case .waitingForHost = items[idx].phase else { continue }
+            let hostId = items[idx].hostId
+            if let until = hostBusyUntil[hostId], until > now {
+                let seconds = max(1, Int(until.timeIntervalSince(now).rounded(.up)))
+                let phase = UploadPhase.waitingForHost(reason: hostBusyReason[hostId] ?? .hostProblem,
+                                                       secondsRemaining: seconds)
+                if items[idx].phase != phase { items[idx].phase = phase }
+            } else {
+                items[idx].phase = .queued          // its turn comes round again
+            }
+        }
         pump()
     }
 
@@ -331,6 +471,8 @@ final class UploadRunner: NSObject, URLSessionDataDelegate {
     enum Outcome {
         case success(savedPath: String?)
         case integrityRejected          // 422 {"error":"integrity"}
+        /// The receiving host said "later" (503 / 429 / 409 / other 5xx).
+        case backpressure(HostBackpressure)
         case failed(message: String)
         case cancelled
     }
@@ -341,6 +483,8 @@ final class UploadRunner: NSObject, URLSessionDataDelegate {
     private let request: URLRequest
     private let fileURL: URL
     private let totalBytes: Int64
+    /// Only used for wording — a person needs "SEMIH-PC is busy", not "503".
+    private let hostName: String
 
     // State — touched only on `delegateQueue` (or before the task starts)
     private var session: URLSession?
@@ -360,10 +504,11 @@ final class UploadRunner: NSObject, URLSessionDataDelegate {
     private let completionLock = NSLock()
     private var didComplete = false
 
-    init(request: URLRequest, fileURL: URL, totalBytes: Int64) {
+    init(request: URLRequest, fileURL: URL, totalBytes: Int64, hostName: String) {
         self.request = request
         self.fileURL = fileURL
         self.totalBytes = totalBytes
+        self.hostName = hostName
         super.init()
     }
 
@@ -427,8 +572,13 @@ final class UploadRunner: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession,
                     dataTask: URLSessionDataTask,
                     didReceive data: Data) {
-        responseBody.append(data)
+        // The §7 answer is a few dozen bytes of JSON either way. Bound it so
+        // a misbehaving peer can never make this a buffering path.
+        let room = Self.maxResponseBodyBytes - responseBody.count
+        if room > 0 { responseBody.append(data.prefix(room)) }
     }
+
+    private static let maxResponseBodyBytes = 8 * 1024
 
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
@@ -454,12 +604,20 @@ final class UploadRunner: NSObject, URLSessionDataDelegate {
         case 422:
             complete(.integrityRejected)
         default:
-            if let apiError = try? JSONDecoder().decode(ApiError.self, from: responseBody) {
-                let message = apiError.message ?? "\(apiError.error) (HTTP \(http.statusCode))"
-                complete(.failed(message: message))
-            } else {
-                complete(.failed(message: "Host returned HTTP \(http.statusCode)."))
+            // Backpressure first — a host with its guest/connection slots
+            // full, or paused, is asking us to wait, not refusing us.
+            let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
+            if let info = HostStatus.backpressure(status: http.statusCode,
+                                                  retryAfterHeader: retryAfter,
+                                                  body: responseBody) {
+                complete(.backpressure(info))
+                return
             }
+            let refusal = HostStatus.failure(status: http.statusCode,
+                                             hostMessage: HostStatus.apiError(in: responseBody)?.message,
+                                             hostName: hostName,
+                                             direction: .outgoing)
+            complete(.failed(message: refusal.message))
         }
     }
 

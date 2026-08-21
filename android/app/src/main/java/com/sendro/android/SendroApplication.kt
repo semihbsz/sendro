@@ -127,6 +127,7 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
         hostPairing = HostPairing()
         receiverHost = ReceiverHost(
             context = this,
+            scope = appScope,
             settings = settings,
             paths = paths,
             mediaSaver = mediaSaver,
@@ -177,11 +178,28 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
      * and a phone's upload would hit a dead port.
      */
     private fun syncForegroundService() {
-        val busy = transferEngine.active.value.any { it.phase.isBusy } ||
-            uploadEngine.items.value.any { it.phase.isBusy } ||
+        val busy = transferEngine.active.value.any { it.phase.isLive } ||
+            uploadEngine.items.value.any { it.phase.isLive } ||
             receiverHost.isRunning
-        if (busy) TransferService.start(this)
+        if (!busy) return
+        // On API 31+ the system refuses a foreground service started from the
+        // background. It does not crash (TransferService.start catches it) —
+        // it just quietly does nothing, which on a TV means the receiver host
+        // is unprotected and will be frozen. Record it, show it in
+        // diagnostics, and try again the moment the app is visible.
+        foregroundServiceBlocked = !TransferService.start(this)
     }
+
+    /**
+     * True when the system last refused to start the foreground service.
+     *
+     * Read by the diagnostics panel: this is the one fault here that the app
+     * genuinely cannot fix on its own, so it gets a sentence instead of a
+     * silent stall.
+     */
+    @Volatile
+    var foregroundServiceBlocked: Boolean = false
+        private set
 
     /**
      * The receiver host follows its setting, and nothing else starts or stops
@@ -214,6 +232,7 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
                 if (first) return@collectLatest
                 discovery.restart()
                 transferEngine.onNetworkChanged()
+                uploadEngine.clearCooldowns()
                 // The advertisement belongs to the old interface and the
                 // pairing screen's addresses are stale; the listening socket
                 // itself is bound to 0.0.0.0 and survives.
@@ -234,8 +253,12 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
                 // Back in the foreground: re-ping every paired host and restart
                 // any parked poll loop.
                 transferEngine.onAppForegrounded()
+                uploadEngine.clearCooldowns()
                 networkWatcher.refresh()
                 discovery.start()
+                // The app is visible, so a foreground service the system
+                // refused while we were in the background is allowed now.
+                syncForegroundService()
             }
 
             override fun onStop(owner: LifecycleOwner) {

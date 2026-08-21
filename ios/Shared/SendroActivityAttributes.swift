@@ -20,6 +20,10 @@ import ActivityKit
 /// Coarse phase shown on the Lock Screen / Dynamic Island. Plain String enum
 /// so it stays Codable/Hashable and carries no availability of its own.
 enum SendroActivityPhase: String, Codable, Hashable {
+    /// Parked on purpose: queued behind other files, or waiting out the
+    /// host's Retry-After. Nothing is streaming, so the Island must not
+    /// claim otherwise.
+    case waiting
     case downloading
     case verifying
     case saving
@@ -28,6 +32,7 @@ enum SendroActivityPhase: String, Codable, Hashable {
 
     var label: String {
         switch self {
+        case .waiting:     return "Waiting for the PC"
         case .downloading: return "Receiving"
         case .verifying:   return "Verifying SHA-256"
         case .saving:      return "Saving"
@@ -38,6 +43,7 @@ enum SendroActivityPhase: String, Codable, Hashable {
 
     var systemImage: String {
         switch self {
+        case .waiting:     return "hourglass"
         case .downloading: return "arrow.down.circle"
         case .verifying:   return "number"
         case .saving:      return "tray.and.arrow.down"

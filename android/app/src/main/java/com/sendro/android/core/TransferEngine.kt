@@ -28,6 +28,26 @@ import java.io.File
 // ---------------------------------------------------------------------------
 
 sealed interface TransferPhase {
+    /**
+     * Accepted, waiting for a slot.
+     *
+     * The host runs a concurrency gate (`core/src/server.rs`, default 2) and
+     * answers 503 when it is full, so the client keeps its own queue at the
+     * same width. [position] is 1-based and recomputed whenever the queue
+     * moves, so a row can say "3rd in line" without knowing about the list.
+     */
+    data class Queued(val position: Int) : TransferPhase
+
+    /**
+     * The host told us to come back later — slots busy, or the user pressed
+     * Pause on the PC. Amber, never red: this is the host working correctly.
+     */
+    data class HostBusy(
+        val message: String,
+        val retryInSeconds: Int,
+        val paused: Boolean,
+    ) : TransferPhase
+
     /** Preflight + prefix re-hash. */
     data object Preparing : TransferPhase
     data object Downloading : TransferPhase
@@ -47,6 +67,8 @@ sealed interface TransferPhase {
 
     val label: String
         get() = when (this) {
+            is Queued -> if (position <= 1) "Waiting…" else "Waiting — $position in line"
+            is HostBusy -> if (retryInSeconds > 0) "$message Retrying in ${retryInSeconds}s." else message
             Preparing -> "Preparing…"
             Downloading -> "Downloading"
             Verifying -> "Verifying…"
@@ -60,6 +82,8 @@ sealed interface TransferPhase {
     /** The short chip label on the Receive list. */
     val shortLabel: String
         get() = when (this) {
+            is Queued -> if (position <= 1) "Next up" else "#$position"
+            is HostBusy -> if (paused) "Paused on PC" else "Host busy"
             Preparing -> "Prep"
             Downloading -> "Receiving"
             Verifying -> "Verifying"
@@ -73,6 +97,16 @@ sealed interface TransferPhase {
     /** True while the foreground service should be alive for this transfer. */
     val isBusy: Boolean
         get() = this is Preparing || this is Downloading || this is Verifying || this is Saving
+
+    /**
+     * True while the transfer is still going to happen by itself. Queued and
+     * backpressured transfers are NOT failures and must never be drawn as
+     * such — that distinction is the whole point of this pair of states.
+     */
+    val isPending: Boolean get() = this is Queued || this is HostBusy
+
+    /** True when the engine is holding it and the user need do nothing. */
+    val isLive: Boolean get() = isBusy || isPending
 }
 
 data class ActiveTransfer(
@@ -82,6 +116,8 @@ data class ActiveTransfer(
     val bytesReceived: Long = 0,
     val bytesPerSecond: Double = 0.0,
     val etaSeconds: Int? = null,
+    /** FIFO ordering for the queue; set once when the transfer is enqueued. */
+    val queuedAtMs: Long = 0,
 ) {
     val id: String get() = offer.transferId
     val fraction: Double
@@ -141,11 +177,39 @@ class TransferEngine(
         /** §12 — never more than this many accept calls in flight. */
         const val BULK_ACCEPT_CONCURRENCY = 4
 
+        /**
+         * How many downloads may be streaming at once.
+         *
+         * The host gates at `settings.concurrency` (`core/src/server.rs`,
+         * default 2, user-settable 1–4) and answers 503 above it. Matching the
+         * default here means the common case never touches the gate at all;
+         * when the user has lowered it to 1, the 503 path below absorbs the
+         * difference instead of turning it into failures.
+         */
+        const val MAX_CONCURRENT_DOWNLOADS = 2
+
+        /**
+         * A transfer that has been getting nothing but "busy" for this long
+         * stops asking and becomes a *resumable* failure the user can retry.
+         * Ten minutes is long enough to outlast a big transfer on the PC and
+         * short enough that a forgotten Pause does not spin all night.
+         */
+        private const val GIVE_UP_AFTER_MS = 10L * 60L * 1000L
+
+        /** A 416 restart is cheap once, suspicious twice, a loop three times. */
+        private const val RANGE_RESTART_LIMIT = 2
+
+        /** How many times a refused §6.3 accept is retried before giving up. */
+        private const val ACCEPT_RETRY_LIMIT = 5
+
         private const val POLL_WAIT_SECONDS = 25
         private const val BACKOFF_CAP_SECONDS = 15.0
 
         /** How often a receive-only peer (§15.1) is re-pinged for presence. */
         private const val RECEIVE_ONLY_PING_MS = 10_000L
+
+        /** How often every paired host's poll loop is checked for liveness. */
+        private const val POLL_WATCHDOG_MS = 30_000L
     }
 
     private val _incoming = MutableStateFlow<List<IncomingOffer>>(emptyList())
@@ -164,6 +228,31 @@ class TransferEngine(
     private val autoResumed = HashSet<String>()
     private var started = false
 
+    // --- queue + backpressure state, all guarded by [stateLock] ------------
+
+    /** hostId -> epoch ms before which this host must not be asked again. */
+    private val hostCooldowns = HashMap<String, Long>()
+
+    /** hostId -> consecutive busy answers, for the exponential-ish backoff. */
+    private val hostBusyStreak = HashMap<String, Int>()
+
+    /** transferId -> epoch ms; the 409 "not ready for this one" cooldown. */
+    private val transferCooldowns = HashMap<String, Long>()
+    private val transferBusyStreak = HashMap<String, Int>()
+
+    /** transferId -> when this transfer FIRST got a busy answer (give-up clock). */
+    private val busySince = HashMap<String, Long>()
+
+    /** transferId -> how many times a 416 has made us start over. */
+    private val rangeRestarts = HashMap<String, Int>()
+
+    /** The pump is a single logical worker; these two make it re-entrant-safe. */
+    private var pumping = false
+    private var pumpAgain = false
+
+    /** Runs only while something is queued or cooling down. */
+    private var tickerJob: Job? = null
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -178,6 +267,26 @@ class TransferEngine(
             paired.hosts.collect { reconcileLoops() }
         }
         reconcileLoops()
+        startPollWatchdog()
+    }
+
+    /**
+     * Revives any poll loop that is no longer running.
+     *
+     * [reconcileLoops] already skips hosts with a live job, so this costs a
+     * map lookup per paired host every [POLL_WATCHDOG_MS]. It exists because a
+     * loop that dies for a reason nobody predicted must not take that host
+     * offline for the rest of the process's life — on a TV, "the PC just
+     * stopped appearing and only a restart fixes it" is the exact complaint
+     * this prevents.
+     */
+    private fun startPollWatchdog() {
+        scope.launch {
+            while (stillActive()) {
+                delay(POLL_WATCHDOG_MS)
+                reconcileLoops()
+            }
+        }
     }
 
     /**
@@ -194,6 +303,9 @@ class TransferEngine(
         cancelAllPolls()
         _hostOnline.value = emptyMap()
         reconcileLoops()
+        // A cooldown measured before the process was frozen means nothing now,
+        // and the user is looking at the screen: try everything again at once.
+        clearCooldowns()
     }
 
     /**
@@ -211,6 +323,30 @@ class TransferEngine(
         cancelAllPolls()
         _hostOnline.value = emptyMap()
         reconcileLoops()
+        // New interface, new sockets: whatever the old one was told about
+        // busy slots no longer applies.
+        clearCooldowns()
+    }
+
+    /**
+     * Forget every backpressure cooldown and try the queue immediately.
+     *
+     * Called on foreground and on network change — both are moments where the
+     * stored "come back in N seconds" is stale by construction.
+     */
+    private fun clearCooldowns() {
+        synchronized(stateLock) {
+            hostCooldowns.clear()
+            hostBusyStreak.clear()
+            transferCooldowns.clear()
+            transferBusyStreak.clear()
+        }
+        // Anything parked on a countdown goes back to plain "Waiting…".
+        _active.update { list ->
+            list.map { if (it.phase is TransferPhase.HostBusy) it.copy(phase = TransferPhase.Queued(0)) else it }
+        }
+        ensureTicker()
+        pump()
     }
 
     private fun cancelAllPolls() {
@@ -238,6 +374,8 @@ class TransferEngine(
     fun unpair(hostId: String) {
         synchronized(stateLock) {
             pollJobs.remove(hostId)?.cancel()
+            hostCooldowns.remove(hostId)
+            hostBusyStreak.remove(hostId)
         }
         _hostOnline.value = _hostOnline.value - hostId
         _active.value.filter { it.hostId == hostId }.forEach { cancel(it.id) }
@@ -331,12 +469,9 @@ class TransferEngine(
             failBulkItem(transferId, "That computer is not reachable right now.")
             return
         }
-        try {
-            client.accept(transferId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            failBulkItem(transferId, "Couldn't accept: ${e.sendroMessage()}")
+        val problem = acceptWithBackoff(client, offer, item.hostId)
+        if (problem != null) {
+            failBulkItem(transferId, problem)
             return
         }
         // Declined or accepted individually while this call was in flight.
@@ -344,7 +479,8 @@ class TransferEngine(
         _incoming.update { list -> list.filterNot { it.id == transferId } }
         synchronized(stateLock) { processedOfferIds.add(transferId) }
         addRecord(offer, item.hostId)
-        startDownload(offer, item.hostId)
+        // §12 accept-all enqueues; it does NOT start 20 sockets at once.
+        enqueue(offer, item.hostId)
     }
 
     private fun failBulkItem(transferId: String, message: String) {
@@ -383,6 +519,7 @@ class TransferEngine(
         paths.partFile(transferId).delete()
         paths.stagedFile(transferId, transfer.offer.fileName).delete()
         removeRecord(transferId)
+        forgetQueueState(transferId)
         _active.update { list -> list.filterNot { it.id == transferId } }
         reportStatus(transfer.hostId, transferId, StatusReport(TransferState.CANCELLED))
         history.add(
@@ -395,14 +532,29 @@ class TransferEngine(
         onTransferActivity()
     }
 
-    /** Resume or retry a failed / interrupted transfer. */
+    /**
+     * Resume or retry a failed / interrupted transfer.
+     *
+     * A manual retry goes through the queue like everything else — it just
+     * jumps the backpressure timers, because the user pressing Retry is an
+     * explicit "try now" and the host will say 503 again harmlessly if it is
+     * still busy.
+     */
     fun resume(transferId: String) {
         val transfer = _active.value.firstOrNull { it.id == transferId } ?: return
         when (transfer.phase) {
-            is TransferPhase.Failed, TransferPhase.Interrupted -> {
+            is TransferPhase.Failed, is TransferPhase.HostBusy, TransferPhase.Interrupted -> {
+                synchronized(stateLock) {
+                    transferCooldowns.remove(transferId)
+                    transferBusyStreak.remove(transferId)
+                    busySince.remove(transferId)
+                    rangeRestarts.remove(transferId)
+                    hostCooldowns.remove(transfer.hostId)
+                    hostBusyStreak.remove(transfer.hostId)
+                }
                 if (hasRecord(transferId)) {
                     // Already accepted on the host — just download again (ranged).
-                    startDownload(transfer.offer, transfer.hostId)
+                    enqueue(transfer.offer, transfer.hostId)
                 } else {
                     // Never accepted (e.g. the storage preflight blocked it).
                     scope.launch { acceptAndStart(transfer.offer, transfer.hostId) }
@@ -481,7 +633,27 @@ class TransferEngine(
      *  - Real unreachability (refused / no route) backs off 1→2→4→8→15 s,
      *    capped, and retries forever — never a terminal stop.
      */
+    /**
+     * Supervises [pollLoopBody]. An unexpected throw restarts the loop instead
+     * of ending it: a permanently dead poll loop is indistinguishable, from
+     * the user's seat, from the PC being switched off.
+     */
     private suspend fun pollLoop(hostId: String) {
+        while (stillActive()) {
+            try {
+                pollLoopBody(hostId)
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "poll loop for $hostId crashed; restarting", e)
+                markOnline(hostId, false)
+                delay(2_000)
+            }
+        }
+    }
+
+    private suspend fun pollLoopBody(hostId: String) {
         var backoff = 0.0
         while (stillActive()) {
             val client = clientFor(hostId)
@@ -630,7 +802,7 @@ class TransferEngine(
             if (transfer.hostId != hostId) continue
             if (transfer.phase != TransferPhase.Interrupted) continue
             val fresh = synchronized(stateLock) { autoResumed.add(transfer.id) }
-            if (fresh) startDownload(transfer.offer, hostId)
+            if (fresh) enqueue(transfer.offer, hostId)
         }
     }
 
@@ -661,19 +833,356 @@ class TransferEngine(
             setPhase(offer.transferId, TransferPhase.Failed("Host is not reachable.", resumable = true))
             return
         }
-        try {
-            client.accept(offer.transferId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            setPhase(
-                offer.transferId,
-                TransferPhase.Failed("Could not accept: ${e.sendroMessage()}", resumable = true),
-            )
+        val problem = acceptWithBackoff(client, offer, hostId)
+        if (problem != null) {
+            setPhase(offer.transferId, TransferPhase.Failed(problem, resumable = true))
             return
         }
         addRecord(offer, hostId)
-        startDownload(offer, hostId)
+        enqueue(offer, hostId)
+    }
+
+    /**
+     * §6.3 accept, with the same "503 is backpressure" ethic as the download.
+     *
+     * The accept itself is not gated by the host's concurrency setting, but
+     * Pause and the §14 guest limit can still refuse it, and an offer that is
+     * never accepted eventually expires — so this retries in place, honouring
+     * the host's `Retry-After`, instead of dropping the offer on the floor.
+     *
+     * @return null on success, or a human-readable problem.
+     */
+    private suspend fun acceptWithBackoff(
+        client: SendroClient,
+        offer: TransferOffer,
+        hostId: String,
+    ): String? {
+        val peerName = peerNameFor(hostId, offer)
+        var attempt = 0
+        while (true) {
+            try {
+                client.accept(offer.transferId)
+                return null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SendroHttpException) {
+                val text = e.explain(peerName, receiving = true)
+                val retryable = e.disposition == HttpDisposition.BACKPRESSURE ||
+                    e.disposition == HttpDisposition.RETRY_SOON ||
+                    e.disposition == HttpDisposition.HOST_ERROR
+                attempt++
+                if (!retryable || attempt > ACCEPT_RETRY_LIMIT) return text
+                val seconds = maxOf(
+                    e.retryAfterSeconds ?: HttpSemantics.MIN_RETRY_SECONDS,
+                    backoffSeconds(attempt),
+                )
+                // Show the wait rather than freezing on "Preparing…".
+                setPhase(
+                    offer.transferId,
+                    TransferPhase.HostBusy(text, seconds, e.busyReason == BusyReason.PAUSED),
+                )
+                delay(seconds * 1000L)
+            } catch (e: Exception) {
+                Log.w(TAG, "accept failed for ${offer.transferId}", e)
+                return "Couldn't tell $peerName to send it — the offer is still there, try again."
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The download queue (JOB 1A) and backpressure (JOB 1B)
+    // -----------------------------------------------------------------------
+    //
+    // There is no separate list: the queue IS the subset of [_active] whose
+    // phase is Queued or HostBusy, ordered by `queuedAtMs`. Keeping it there
+    // means a queued transfer is a first-class visible row with a cancel
+    // button, not an invisible entry in a side structure that can drift out of
+    // sync with what the user sees.
+    //
+    //  - [enqueue] is the ONLY way a download starts. Accept, accept-all,
+    //    manual retry, relaunch-resume and post-503 retries all funnel here.
+    //  - [pump] is the only thing that calls [startDownload]. It is idempotent
+    //    and re-entrancy safe: a second caller while it is running just sets a
+    //    flag, and the running pass loops once more.
+    //  - Cooldowns are keyed per HOST for "slots busy" / "paused" (they are
+    //    properties of the host, so one 503 must not make ten transfers each
+    //    hammer it) and per TRANSFER for 409 (a property of that one item).
+
+    /** Put a transfer in line. Safe to call repeatedly for the same id. */
+    private fun enqueue(offer: TransferOffer, hostId: String) {
+        val transferId = offer.transferId
+        synchronized(stateLock) {
+            if (downloadJobs[transferId]?.isActive == true) return
+        }
+        val now = System.currentTimeMillis()
+        _active.update { list ->
+            if (list.any { it.id == transferId }) {
+                list.map { row ->
+                    if (row.id != transferId) {
+                        row
+                    } else {
+                        row.copy(
+                            phase = TransferPhase.Queued(0),
+                            bytesPerSecond = 0.0,
+                            etaSeconds = null,
+                            // First enqueue wins, so a transfer that gets
+                            // bounced by a 503 keeps its place in line instead
+                            // of going to the back every time.
+                            queuedAtMs = if (row.queuedAtMs > 0L) row.queuedAtMs else now,
+                        )
+                    }
+                }
+            } else {
+                list + ActiveTransfer(
+                    offer = offer,
+                    hostId = hostId,
+                    phase = TransferPhase.Queued(0),
+                    bytesReceived = paths.partFile(transferId).length(),
+                    queuedAtMs = now,
+                )
+            }
+        }
+        ensureTicker()
+        pump()
+    }
+
+    /**
+     * Start whatever may be started. Idempotent, re-entrancy safe, cheap when
+     * there is nothing to do.
+     */
+    private fun pump() {
+        synchronized(stateLock) {
+            if (pumping) {
+                pumpAgain = true
+                return
+            }
+            pumping = true
+            pumpAgain = false
+        }
+        try {
+            while (true) {
+                pumpOnce()
+                // Clearing `pumping` and observing `pumpAgain` happen in the
+                // same critical section, so a request that arrives while we
+                // are finishing can never be lost.
+                val again = synchronized(stateLock) {
+                    if (pumpAgain) {
+                        pumpAgain = false
+                        true
+                    } else {
+                        pumping = false
+                        false
+                    }
+                }
+                if (!again) return
+            }
+        } catch (t: Throwable) {
+            synchronized(stateLock) {
+                pumping = false
+                pumpAgain = false
+            }
+            throw t
+        }
+    }
+
+    private fun pumpOnce() {
+        val now = System.currentTimeMillis()
+        val starts = ArrayList<Pair<TransferOffer, String>>()
+        synchronized(stateLock) {
+            // The authoritative "how many are streaming" is the job map, not
+            // the phase, because a job exists from the instant it is launched.
+            var running = downloadJobs.count { it.value.isActive }
+            val waiting = _active.value
+                .filter { it.phase.isPending }
+                .sortedBy { it.queuedAtMs }
+            for (row in waiting) {
+                if (running >= MAX_CONCURRENT_DOWNLOADS) break
+                if (downloadJobs[row.id]?.isActive == true) continue
+                // A host on cooldown is skipped, not blocking: another host's
+                // transfer further down the line may still go.
+                if (cooldownUntilLocked(row.hostId, row.id) > now) continue
+                starts += row.offer to row.hostId
+                running++
+            }
+        }
+        starts.forEach { (offer, hostId) -> startDownload(offer, hostId) }
+        renumberQueue()
+    }
+
+    /** Give every waiting row its 1-based place in line. */
+    private fun renumberQueue() {
+        val order = _active.value.filter { it.phase.isPending }.sortedBy { it.queuedAtMs }
+        if (order.isEmpty()) return
+        val positions = HashMap<String, Int>(order.size)
+        order.forEachIndexed { index, row -> positions[row.id] = index + 1 }
+        _active.update { list ->
+            list.map { row ->
+                val phase = row.phase
+                val position = positions[row.id]
+                if (phase is TransferPhase.Queued && position != null && phase.position != position) {
+                    row.copy(phase = TransferPhase.Queued(position))
+                } else {
+                    row
+                }
+            }
+        }
+    }
+
+    private fun cooldownUntilLocked(hostId: String, transferId: String): Long =
+        maxOf(hostCooldowns[hostId] ?: 0L, transferCooldowns[transferId] ?: 0L)
+
+    /**
+     * One-second heartbeat, alive only while something is waiting.
+     *
+     * It does two jobs: count the "retrying in Ns" label down so the user can
+     * see the app is still trying, and re-pump so an expired cooldown is
+     * noticed without anything else having to happen.
+     */
+    private fun ensureTicker() {
+        synchronized(stateLock) {
+            if (tickerJob?.isActive == true) return
+            tickerJob = scope.launch { tickLoop() }
+        }
+    }
+
+    private suspend fun tickLoop() {
+        while (stillActive()) {
+            val now = System.currentTimeMillis()
+            for (row in _active.value) {
+                val phase = row.phase
+                if (phase !is TransferPhase.HostBusy) continue
+                val until = synchronized(stateLock) { cooldownUntilLocked(row.hostId, row.id) }
+                val seconds = if (until <= now) 0 else (((until - now) + 999L) / 1000L).toInt()
+                if (seconds != phase.retryInSeconds) {
+                    setPhase(row.id, phase.copy(retryInSeconds = seconds))
+                }
+            }
+            pump()
+            val done = synchronized(stateLock) {
+                if (_active.value.none { it.phase.isPending }) {
+                    tickerJob = null
+                    true
+                } else {
+                    false
+                }
+            }
+            if (done) return
+            delay(1_000)
+        }
+        synchronized(stateLock) { tickerJob = null }
+    }
+
+    /**
+     * Record a host-wide "come back later" (503 from the concurrency gate, or
+     * Pause on the PC) and park the transfer on an amber countdown.
+     *
+     * The delay is the larger of what the host asked for and our own
+     * exponential-ish backoff, so a host that keeps saying "2 seconds" while
+     * it is genuinely saturated does not get polled twice a second forever.
+     */
+    private fun noteHostBusy(hostId: String, transferId: String, outcome: DownloadTask.Outcome.Busy) {
+        val now = System.currentTimeMillis()
+        val delaySeconds = synchronized(stateLock) {
+            val streak = (hostBusyStreak[hostId] ?: 0) + 1
+            hostBusyStreak[hostId] = streak
+            val mine = backoffSeconds(streak)
+            val seconds = maxOf(outcome.retryAfterSeconds ?: HttpSemantics.MIN_RETRY_SECONDS, mine)
+            hostCooldowns[hostId] = now + seconds * 1000L
+            seconds
+        }
+        parkAsBusy(
+            transferId = transferId,
+            message = outcome.message,
+            delaySeconds = delaySeconds,
+            paused = outcome.reason == BusyReason.PAUSED,
+            now = now,
+        )
+    }
+
+    /** The 409 equivalent: this ONE transfer is not ready, the host is fine. */
+    private fun noteTransferNotReady(transferId: String, message: String, retryAfterSeconds: Int?) {
+        val now = System.currentTimeMillis()
+        val delaySeconds = synchronized(stateLock) {
+            val streak = (transferBusyStreak[transferId] ?: 0) + 1
+            transferBusyStreak[transferId] = streak
+            val seconds = maxOf(retryAfterSeconds ?: HttpSemantics.MIN_RETRY_SECONDS, backoffSeconds(streak))
+            transferCooldowns[transferId] = now + seconds * 1000L
+            seconds
+        }
+        parkAsBusy(transferId, message, delaySeconds, paused = false, now = now)
+    }
+
+    /** 1, 2, 4, 8, 16, 30, 30… seconds — clamped by [HttpSemantics]. */
+    private fun backoffSeconds(streak: Int): Int {
+        val exponent = (streak - 1).coerceIn(0, 5)
+        val raw = HttpSemantics.MIN_RETRY_SECONDS.toLong() shl exponent
+        return HttpSemantics.clampRetry(raw)
+    }
+
+    /**
+     * Amber, not red. Unless the transfer has been getting nothing but this
+     * for [GIVE_UP_AFTER_MS] — then it becomes a failure the user can still
+     * retry, because a permanent silent countdown is its own kind of lie.
+     */
+    private fun parkAsBusy(
+        transferId: String,
+        message: String,
+        delaySeconds: Int,
+        paused: Boolean,
+        now: Long,
+    ) {
+        val since = synchronized(stateLock) {
+            val existing = busySince[transferId]
+            if (existing == null) {
+                busySince[transferId] = now
+                now
+            } else {
+                existing
+            }
+        }
+        if (now - since >= GIVE_UP_AFTER_MS) {
+            synchronized(stateLock) {
+                busySince.remove(transferId)
+                transferCooldowns.remove(transferId)
+                transferBusyStreak.remove(transferId)
+            }
+            setPhase(
+                transferId,
+                TransferPhase.Failed(
+                    if (paused) {
+                        "$message Nothing was lost — press Retry once transfers are resumed."
+                    } else {
+                        "$message It has stayed busy for a while — press Retry to try again."
+                    },
+                    resumable = true,
+                ),
+            )
+            pump()
+            return
+        }
+        setPhase(transferId, TransferPhase.HostBusy(message, delaySeconds, paused))
+        ensureTicker()
+        pump()
+    }
+
+    /** A slot was granted / the file landed: this host is not busy after all. */
+    private fun clearBusyState(hostId: String, transferId: String) {
+        synchronized(stateLock) {
+            hostCooldowns.remove(hostId)
+            hostBusyStreak.remove(hostId)
+            transferCooldowns.remove(transferId)
+            transferBusyStreak.remove(transferId)
+            busySince.remove(transferId)
+        }
+    }
+
+    private fun forgetQueueState(transferId: String) {
+        synchronized(stateLock) {
+            transferCooldowns.remove(transferId)
+            transferBusyStreak.remove(transferId)
+            busySince.remove(transferId)
+            rangeRestarts.remove(transferId)
+        }
     }
 
     private fun startDownload(offer: TransferOffer, hostId: String) {
@@ -690,11 +1199,15 @@ class TransferEngine(
         upsertActive(offer, hostId, TransferPhase.Preparing)
         onTransferActivity()
 
+        val peerName = peerNameFor(hostId, offer)
         val job = scope.launch {
-            val task = DownloadTask(offer, paths.partFile(transferId), client)
+            val task = DownloadTask(offer, paths.partFile(transferId), client, peerName)
             var lastStatusMs = 0L
             val outcome = task.run(
                 onBegan = { resumedFrom ->
+                    // Bytes are moving, so whatever the host said last time
+                    // about being full is history.
+                    clearBusyState(hostId, transferId)
                     setPhase(transferId, TransferPhase.Downloading)
                     setBytes(transferId, resumedFrom)
                     reportStatus(
@@ -724,6 +1237,8 @@ class TransferEngine(
             synchronized(stateLock) { downloadJobs.remove(transferId) }
             handleOutcome(outcome, offer, hostId)
             onTransferActivity()
+            // A slot just freed up, whatever the outcome was.
+            pump()
         }
         synchronized(stateLock) { downloadJobs[transferId] = job }
         job.invokeOnCompletion { cause ->
@@ -736,9 +1251,16 @@ class TransferEngine(
                     setPhase(transferId, TransferPhase.Interrupted)
                 }
                 onTransferActivity()
+                pump()
             }
         }
     }
+
+    /** The best name we have for the device on the other end of a transfer. */
+    private fun peerNameFor(hostId: String, offer: TransferOffer): String =
+        paired.host(hostId)?.name?.takeIf { it.isNotBlank() }
+            ?: offer.senderName.takeIf { it.isNotBlank() }
+            ?: "the sender"
 
     private suspend fun handleOutcome(
         outcome: DownloadTask.Outcome,
@@ -748,6 +1270,8 @@ class TransferEngine(
         val transferId = offer.transferId
         when (outcome) {
             is DownloadTask.Outcome.Verified -> {
+                clearBusyState(hostId, transferId)
+                forgetQueueState(transferId)
                 setBytes(transferId, offer.sizeBytes)
                 reportStatus(
                     hostId, transferId,
@@ -759,6 +1283,7 @@ class TransferEngine(
             DownloadTask.Outcome.IntegrityMismatch -> {
                 paths.partFile(transferId).delete()
                 removeRecord(transferId)
+                forgetQueueState(transferId)
                 reportStatus(hostId, transferId, StatusReport(TransferState.FAILED, error = "integrity"))
                 setPhase(
                     transferId,
@@ -777,6 +1302,68 @@ class TransferEngine(
                     errorMessage = "integrity",
                 )
                 notifier.notifyTransferFailed(transferId, offer.fileName, "integrity check")
+            }
+
+            // ---- backpressure: the host is fine, it is just full ----------
+            is DownloadTask.Outcome.Busy -> {
+                // Deliberately NO status report and NO notification: nothing
+                // has failed, and telling the host "failed" would make it drop
+                // a transfer we still very much want.
+                Log.i(TAG, "host $hostId busy (${outcome.reason}) for $transferId")
+                noteHostBusy(hostId, transferId, outcome)
+            }
+
+            is DownloadTask.Outcome.NotReady -> {
+                Log.i(TAG, "host $hostId not ready for $transferId")
+                noteTransferNotReady(transferId, outcome.message, outcome.retryAfterSeconds)
+            }
+
+            // ---- our resume offset did not line up: start over -------------
+            is DownloadTask.Outcome.RangeMismatch -> {
+                val restarts = synchronized(stateLock) {
+                    val next = (rangeRestarts[transferId] ?: 0) + 1
+                    rangeRestarts[transferId] = next
+                    next
+                }
+                paths.partFile(transferId).delete()
+                setBytes(transferId, 0)
+                if (restarts > RANGE_RESTART_LIMIT) {
+                    reportStatus(
+                        hostId, transferId,
+                        StatusReport(TransferState.FAILED, error = "range_mismatch"),
+                    )
+                    setPhase(
+                        transferId,
+                        TransferPhase.Failed(
+                            "${outcome.message} That kept happening, so it stopped — " +
+                                "press Retry to take the file from the beginning.",
+                            resumable = true,
+                        ),
+                    )
+                    notifier.notifyTransferFailed(transferId, offer.fileName, "resume mismatch")
+                } else {
+                    enqueue(offer, hostId)
+                }
+            }
+
+            // ---- retrying genuinely cannot help ----------------------------
+            is DownloadTask.Outcome.Unrecoverable -> {
+                removeRecord(transferId)
+                forgetQueueState(transferId)
+                reportStatus(
+                    hostId, transferId,
+                    StatusReport(TransferState.FAILED, error = outcome.message),
+                )
+                setPhase(transferId, TransferPhase.Failed(outcome.message, resumable = false))
+                history.add(
+                    transferId = transferId,
+                    fileName = offer.fileName,
+                    sizeBytes = offer.sizeBytes,
+                    senderName = offer.senderName,
+                    outcome = "failed",
+                    errorMessage = outcome.message,
+                )
+                notifier.notifyTransferFailed(transferId, offer.fileName, outcome.message)
             }
 
             is DownloadTask.Outcome.Failed -> {
@@ -998,7 +1585,9 @@ class TransferEngine(
     }
 
     private fun setPhase(transferId: String, phase: TransferPhase) = mutateActive(transferId) {
-        if (phase is TransferPhase.Failed) {
+        // Nothing is moving in any of these, so a stale speed / ETA would be
+        // the row telling a small lie while it waits.
+        if (phase is TransferPhase.Failed || phase.isPending) {
             it.copy(phase = phase, bytesPerSecond = 0.0, etaSeconds = null)
         } else {
             it.copy(phase = phase)

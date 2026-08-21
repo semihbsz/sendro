@@ -1,7 +1,6 @@
 package com.sendro.android.core
 
 import android.content.Context
-import android.os.Build
 import android.util.Log
 import com.sendro.android.BuildConfig
 import kotlinx.coroutines.CancellationException
@@ -180,7 +179,16 @@ class UpdateChecker(
         http.newCall(request).awaitResponse().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw java.io.IOException("HTTP ${response.code}")
+                // No bare numbers here either — this string is shown verbatim
+                // on the Settings card.
+                throw java.io.IOException(
+                    when (response.code) {
+                        403, 429 -> "GitHub is rate-limiting this device. Try again in a few minutes."
+                        404 -> "No release manifest has been published yet."
+                        in 500..599 -> "GitHub is having trouble right now."
+                        else -> "GitHub didn't answer with a release manifest."
+                    },
+                )
             }
             return SendroJson.decodeFromString(body)
         }
@@ -215,7 +223,14 @@ class UpdateChecker(
                     val request = Request.Builder().url(manifest.apkUrl).get().build()
                     http.newCall(request).awaitResponse().use { response ->
                         if (!response.isSuccessful) {
-                            throw java.io.IOException("HTTP ${response.code}")
+                            throw java.io.IOException(
+                                when (response.code) {
+                                    403, 429 -> "GitHub is rate-limiting this device. Try again shortly."
+                                    404 -> "That release download is no longer available."
+                                    in 500..599 -> "GitHub is having trouble right now."
+                                    else -> "GitHub refused the download."
+                                },
+                            )
                         }
                         val body = response.body ?: throw java.io.IOException("Empty response")
                         val total = body.contentLength().takeIf { it > 0 }

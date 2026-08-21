@@ -280,14 +280,9 @@ class SendroClient private constructor(
         val response = client.newCall(request).awaitResponse()
         return response.use { r ->
             val text = r.body?.string().orEmpty()
-            if (!r.isSuccessful) throw errorFor(r.code, text)
+            if (!r.isSuccessful) throw errorFor(r.code, text, r.header("Retry-After"))
             text
         }
-    }
-
-    private fun errorFor(status: Int, body: String): SendroHttpException {
-        val parsed = runCatching { SendroJson.decodeFromString<ApiError>(body) }.getOrNull()
-        return SendroHttpException(status, parsed?.error, parsed?.message)
     }
 }
 
@@ -358,19 +353,51 @@ internal fun Response.closeQuietly() {
     runCatching { close() }
 }
 
-/** §9 — an HTTP error with the host's own error code/message when it gave one. */
+/**
+ * §9 — an HTTP error carrying everything the state machine needs.
+ *
+ * [retryAfterSeconds] is the host's own `Retry-After`, already clamped. It is
+ * the difference between "this transfer failed" and "the host told us when to
+ * come back", and the whole 503 story depends on it surviving up to the
+ * engine rather than being flattened into a string here.
+ */
 class SendroHttpException(
     val status: Int,
     val code: String?,
     val serverMessage: String?,
+    /** Clamped `Retry-After`, or null when the host did not send a usable one. */
+    val retryAfterSeconds: Int? = null,
 ) : IOException(
+    // Even the exception's own message must be readable: it can reach the UI
+    // through `sendroMessage()` on paths that have no peer name to hand.
     when {
         !serverMessage.isNullOrBlank() -> serverMessage
-        !code.isNullOrBlank() -> "$code (HTTP $status)"
-        status > 0 -> "HTTP $status"
-        else -> "Request failed"
+        status > 0 -> HttpSemantics.explain(status, serverMessage, "The other device", receiving = true)
+        else -> "The request was refused."
     },
-)
+) {
+    val disposition: HttpDisposition get() = HttpSemantics.disposition(status)
+
+    val busyReason: BusyReason get() = HttpSemantics.busyReason(serverMessage)
+
+    /** Plain language for the UI. Never contains a status number. */
+    fun explain(peerName: String, receiving: Boolean): String =
+        HttpSemantics.explain(status, serverMessage, peerName, receiving)
+}
+
+/**
+ * Builds the typed exception for a non-2xx response, keeping the host's
+ * `Retry-After` intact.
+ */
+internal fun errorFor(status: Int, body: String, retryAfter: String?): SendroHttpException {
+    val parsed = runCatching { SendroJson.decodeFromString<ApiError>(body) }.getOrNull()
+    return SendroHttpException(
+        status = status,
+        code = parsed?.error,
+        serverMessage = parsed?.message,
+        retryAfterSeconds = HttpSemantics.retryAfterSeconds(retryAfter),
+    )
+}
 
 /** Human text for anything thrown by the client, for direct UI display. */
 fun Throwable.sendroMessage(): String =

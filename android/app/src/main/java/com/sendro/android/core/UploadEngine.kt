@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +26,16 @@ import java.util.UUID
 sealed interface UploadPhase {
     data object Queued : UploadPhase
 
+    /**
+     * The PC said "not now" (503 from the transfer gate, from Pause, or from
+     * the §14 guest-connection limit). Amber, and it retries itself.
+     */
+    data class HostBusy(
+        val message: String,
+        val retryInSeconds: Int,
+        val paused: Boolean,
+    ) : UploadPhase
+
     /** Streaming SHA-256 before the POST. */
     data object Hashing : UploadPhase
     data object Uploading : UploadPhase
@@ -36,6 +47,18 @@ sealed interface UploadPhase {
     val label: String
         get() = when (this) {
             Queued -> "Waiting"
+            is HostBusy -> if (retryInSeconds > 0) "$message Retrying in ${retryInSeconds}s." else message
+            Hashing -> "Hashing"
+            Uploading -> "Sending"
+            Done -> "Landed"
+            is Failed -> "Failed"
+        }
+
+    /** The short chip label. */
+    val shortLabel: String
+        get() = when (this) {
+            Queued -> "Waiting"
+            is HostBusy -> if (paused) "Paused on PC" else "Host busy"
             Hashing -> "Hashing"
             Uploading -> "Sending"
             Done -> "Landed"
@@ -43,6 +66,11 @@ sealed interface UploadPhase {
         }
 
     val isBusy: Boolean get() = this is Hashing || this is Uploading
+
+    /** Still going to happen by itself: never draw these as errors. */
+    val isPending: Boolean get() = this is Queued || this is HostBusy
+
+    val isLive: Boolean get() = isBusy || isPending
 }
 
 data class UploadItem(
@@ -98,6 +126,19 @@ class UploadEngine(
     private var currentId: String? = null
     private var currentJob: Job? = null
 
+    /**
+     * Backpressure state, guarded by [lock]. Uploads stay strictly sequential
+     * — the queue's width is 1 — so the only thing that can go wrong is
+     * hammering a host that has already said it is full. Cooldowns are per
+     * HOST because that is what the 503 is about.
+     */
+    private val hostCooldowns = HashMap<String, Long>()
+    private val hostBusyStreak = HashMap<String, Int>()
+
+    /** itemId -> when it FIRST got a busy answer, for the give-up clock. */
+    private val busySince = HashMap<String, Long>()
+    private var tickerJob: Job? = null
+
     // -----------------------------------------------------------------------
     // Queue control (UI)
     // -----------------------------------------------------------------------
@@ -136,9 +177,18 @@ class UploadEngine(
 
     /** §7 has no ranged upload — a retry restarts the stream from byte 0. */
     fun retry(itemId: String) {
+        val item = _items.value.firstOrNull { it.id == itemId }
+        if (item != null) {
+            // An explicit "try now" beats any countdown we were sitting on.
+            synchronized(lock) {
+                hostCooldowns.remove(item.hostId)
+                hostBusyStreak.remove(item.hostId)
+                busySince.remove(itemId)
+            }
+        }
         _items.update { list ->
             list.map {
-                if (it.id == itemId && it.phase is UploadPhase.Failed) {
+                if (it.id == itemId && (it.phase is UploadPhase.Failed || it.phase is UploadPhase.HostBusy)) {
                     it.copy(
                         phase = UploadPhase.Queued,
                         bytesSent = 0,
@@ -164,9 +214,12 @@ class UploadEngine(
     // -----------------------------------------------------------------------
 
     private fun pump() {
+        val now = System.currentTimeMillis()
         val next = synchronized(lock) {
             if (currentId != null) return
-            val candidate = _items.value.firstOrNull { it.phase is UploadPhase.Queued } ?: return
+            val candidate = _items.value.firstOrNull {
+                it.phase.isPending && (hostCooldowns[it.hostId] ?: 0L) <= now
+            } ?: return
             currentId = candidate.id
             candidate
         }
@@ -224,13 +277,21 @@ class UploadEngine(
             _items.update { list -> list.filterNot { it.id == itemId } }
             deleteStaged(item.file)
             throw e
+        } catch (e: SendroHttpException) {
+            Log.w(TAG, "upload rejected", e)
+            outcomeFor(e, item.hostName)
         } catch (e: Exception) {
             Log.w(TAG, "upload failed", e)
-            Outcome.Failed(e.sendroMessage())
+            Outcome.Failed("Couldn't reach ${item.hostName} — the file is still here, try again.")
         }
 
         when (outcome) {
             is Outcome.Success -> {
+                synchronized(lock) {
+                    hostCooldowns.remove(item.hostId)
+                    hostBusyStreak.remove(item.hostId)
+                    busySince.remove(itemId)
+                }
                 update(itemId) {
                     it.copy(
                         phase = UploadPhase.Done,
@@ -264,6 +325,10 @@ class UploadEngine(
                 )
             }
 
+            // 503 — the PC is full or paused. Not a failure: park the item on
+            // an amber countdown and let the sequential pump come back to it.
+            is Outcome.Busy -> noteHostBusy(item, itemId, outcome)
+
             is Outcome.Failed -> update(itemId) {
                 it.copy(
                     phase = UploadPhase.Failed(outcome.message),
@@ -279,7 +344,133 @@ class UploadEngine(
 
         /** 422 {"error":"integrity"} */
         data object IntegrityRejected : Outcome
+
+        /** 429 / 503 with the host's own `Retry-After`. */
+        data class Busy(
+            val reason: BusyReason,
+            val retryAfterSeconds: Int?,
+            val message: String,
+        ) : Outcome
+
         data class Failed(val message: String) : Outcome
+    }
+
+    /** Maps one rejected request onto an outcome, without ever naming a code. */
+    private fun outcomeFor(error: SendroHttpException, peerName: String): Outcome {
+        val text = error.explain(peerName, receiving = false)
+        return when (error.disposition) {
+            HttpDisposition.BACKPRESSURE ->
+                Outcome.Busy(error.busyReason, error.retryAfterSeconds, text)
+            HttpDisposition.INTEGRITY -> Outcome.IntegrityRejected
+            // §7 has no ranged upload, so "retry soon" and a host hiccup both
+            // just mean: start the stream again in a moment.
+            HttpDisposition.RETRY_SOON, HttpDisposition.HOST_ERROR ->
+                Outcome.Busy(BusyReason.UNKNOWN, error.retryAfterSeconds, text)
+            else -> Outcome.Failed(text)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Backpressure
+    // -----------------------------------------------------------------------
+
+    /**
+     * Forget every cooldown and try again now. Called when the app comes to
+     * the foreground or the network changes — a countdown measured against an
+     * old interface or a frozen process is meaningless.
+     */
+    fun clearCooldowns() {
+        synchronized(lock) {
+            hostCooldowns.clear()
+            hostBusyStreak.clear()
+        }
+        _items.update { list ->
+            list.map { if (it.phase is UploadPhase.HostBusy) it.copy(phase = UploadPhase.Queued) else it }
+        }
+        pump()
+    }
+
+    private fun noteHostBusy(item: UploadItem, itemId: String, outcome: Outcome.Busy) {
+        val now = System.currentTimeMillis()
+        val seconds = synchronized(lock) {
+            val streak = (hostBusyStreak[item.hostId] ?: 0) + 1
+            hostBusyStreak[item.hostId] = streak
+            val exponent = (streak - 1).coerceIn(0, 5)
+            val mine = HttpSemantics.clampRetry(HttpSemantics.MIN_RETRY_SECONDS.toLong() shl exponent)
+            val value = maxOf(outcome.retryAfterSeconds ?: HttpSemantics.MIN_RETRY_SECONDS, mine)
+            hostCooldowns[item.hostId] = now + value * 1000L
+            value
+        }
+        val since = synchronized(lock) {
+            val existing = busySince[itemId]
+            if (existing == null) {
+                busySince[itemId] = now
+                now
+            } else {
+                existing
+            }
+        }
+        if (now - since >= GIVE_UP_AFTER_MS) {
+            synchronized(lock) { busySince.remove(itemId) }
+            update(itemId) {
+                it.copy(
+                    phase = UploadPhase.Failed(
+                        "${outcome.message} It has stayed busy for a while — press Retry to try again.",
+                    ),
+                    bytesSent = 0,
+                    bytesPerSecond = 0.0,
+                    etaSeconds = null,
+                )
+            }
+            return
+        }
+        update(itemId) {
+            it.copy(
+                phase = UploadPhase.HostBusy(
+                    message = outcome.message,
+                    retryInSeconds = seconds,
+                    paused = outcome.reason == BusyReason.PAUSED,
+                ),
+                // §7 has no resume, so the next attempt starts from byte 0.
+                bytesSent = 0,
+                bytesPerSecond = 0.0,
+                etaSeconds = null,
+            )
+        }
+        ensureTicker()
+    }
+
+    private fun ensureTicker() {
+        synchronized(lock) {
+            if (tickerJob?.isActive == true) return
+            tickerJob = scope.launch { tickLoop() }
+        }
+    }
+
+    private suspend fun tickLoop() {
+        while (true) {
+            val now = System.currentTimeMillis()
+            for (item in _items.value) {
+                val phase = item.phase
+                if (phase !is UploadPhase.HostBusy) continue
+                val until = synchronized(lock) { hostCooldowns[item.hostId] ?: 0L }
+                val seconds = if (until <= now) 0 else (((until - now) + 999L) / 1000L).toInt()
+                if (seconds != phase.retryInSeconds) {
+                    update(item.id) { it.copy(phase = phase.copy(retryInSeconds = seconds)) }
+                }
+            }
+            pump()
+            val done = synchronized(lock) {
+                if (_items.value.none { it.phase is UploadPhase.HostBusy }) {
+                    tickerJob = null
+                    true
+                } else {
+                    false
+                }
+            }
+            if (done) return
+            delay(1_000)
+        }
     }
 
     private suspend fun postFile(
@@ -328,16 +519,9 @@ class UploadEngine(
                     Outcome.Success(parsed?.savedPath)
                 }
                 422 -> Outcome.IntegrityRejected
-                else -> {
-                    val parsed = runCatching {
-                        SendroJson.decodeFromString<ApiError>(body)
-                    }.getOrNull()
-                    Outcome.Failed(
-                        parsed?.message
-                            ?: parsed?.error?.let { "$it (HTTP ${r.code})" }
-                            ?: "Host returned HTTP ${r.code}.",
-                    )
-                }
+                // Everything else goes through the shared semantics so the row
+                // says what happened, never a number.
+                else -> outcomeFor(errorFor(r.code, body, r.header("Retry-After")), item.hostName)
             }
         }
     }
@@ -412,6 +596,9 @@ class UploadEngine(
     private companion object {
         const val TAG = "SendroUpload"
         const val PROGRESS_INTERVAL_MS = 250L
+
+        /** Same give-up window as the download queue. */
+        const val GIVE_UP_AFTER_MS = 10L * 60L * 1000L
     }
 }
 
