@@ -63,7 +63,7 @@ struct SettingsView: View {
                                 }
                                 .tint(Theme.iris)
                             }
-                            caption("Only applies to offers your PC flags as auto-send (watch-folder rules). Everything else always asks.")
+                            caption("Files from a computer you paired with start downloading straight away, with no prompt. Turn it off and every file asks first. Devices you have not paired with can never send you anything either way.")
                         }
 
                         section(tag: "Notifications") {

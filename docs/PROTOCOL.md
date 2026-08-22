@@ -188,6 +188,23 @@ Accepting moves the host-side state to `Accepted` and authorizes download.
 - Host tracks bytes served for progress display but the client's status
   reports (6.5) are authoritative for client-side progress.
 
+**Concurrency and backpressure.** A host serves at most `settings.concurrency`
+(default 2) simultaneous streams. Requesting a file while every slot is taken
+is the normal case — sending ten files at once means eight of them arrive
+early — so the host **waits** for a slot rather than refusing: the request is
+parked for up to 45 s and then served like any other. Only if that wait runs
+out does the host answer `503` + `Retry-After: <seconds>` with
+`{"error":"rate_limited"}`.
+
+The same `503` + `Retry-After` is returned while the host's global pause gate
+is on (`{"message":"transfers paused"}`).
+
+A `503` is **backpressure, never a failure.** A client MUST NOT surface it as
+a failed transfer, MUST NOT report `failed` in §6.5, and MUST retry after
+`Retry-After`. Clients also queue locally — never more concurrent downloads
+per host than the host's own gate — so in practice a `503` is only seen when
+something else (a second device, a §14 guest) holds the slots.
+
 ### 6.5 Status reporting (client → host)
 
 `POST /api/v1/transfers/{transferId}/status` (authenticated)
@@ -298,6 +315,29 @@ the card discards it. Same 32 KiB limit and `413` behaviour.
   **Dismiss/Close** button that removes it permanently.
 - Copy writes to the OS clipboard. Dismiss frees the memory.
 - Nothing about the message is logged, persisted, or shown in history.
+
+### 11.4 Local notes shelf (client-side, optional)
+
+The ephemerality rules above are about **the wire and the host**: a host holds
+a message in RAM until it is delivered or dismissed and never writes it down.
+That does not change.
+
+A *client* may additionally keep its own copy of text it sent or received, on
+that device only, as a "notes shelf" — so a Wi-Fi password can be read again
+after the card is gone. Where a client does this it MUST:
+
+- keep the copy **local**: never upload it, never sync it, never put it in
+  transfer history, never place the text in a notification body;
+- **time-box** it to at most **24 hours**, with the expiry stamped on each
+  note at creation, enforced on load, on every write and by a periodic sweep,
+  and with no way for the user or the app to extend it;
+- store it **app-private** and encrypted at rest where the platform offers it
+  (iOS: `.completeFileProtection`; Android: app-internal storage);
+- offer **delete one** and **clear all**;
+- bound the shelf (Sendro uses 200 notes, oldest dropped first).
+
+Both Sendro clients implement this as the **Notes** tab. The host implements
+nothing for it — there is no protocol surface here, which is the point.
 
 ## 12. Bulk accept
 

@@ -1,8 +1,8 @@
 {
-  "version": "1.0.0",
-  "pubDate": "2026-08-16T00:00:00Z",
-  "notes": "First public Sendro release: LAN transfers verified byte-for-byte, QR pairing, Sendro Link, watch folders, and in-app updates.",
-  "notesTr": "İlk genel Sendro sürümü: bayt bayt doğrulanan yerel ağ transferleri, QR ile eşleştirme, Sendro Link, klasör izleme ve uygulama içi güncelleme.",
+  "version": "1.0.1",
+  "pubDate": "2026-08-22T00:00:00Z",
+  "notes": "Transfers no longer fail with HTTP 503 when you send many files at once — the host now queues requests instead of refusing them, and both phone apps treat backpressure as \"wait\", never as a failure. Retry from the PC works again. \"Auto-accept from trusted devices\" now applies to every file from a paired computer. New Notes tab keeps sent and received text on your phone for 24 hours, and failed transfers can be cleared in one tap.",
+  "notesTr": "Aynı anda çok dosya gönderirken alınan HTTP 503 hatası giderildi: bilgisayar artık istekleri reddetmek yerine sıraya alıyor, telefon uygulamaları da yoğunluğu hata değil \"bekle\" olarak görüyor. PC'den Yeniden dene tekrar çalışıyor. \"Güvenilen cihazlardan otomatik kabul\" artık eşleşmiş bilgisayardan gelen her dosya için geçerli. Yeni Notes sekmesi gönderilen ve gelen yazıları telefonda 24 saat saklıyor; başarısız transferler tek dokunuşla temizleniyor.",
   "minSupported": "1.0.0",
   "mandatory": false
 }

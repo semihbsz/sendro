@@ -39,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sendro.android.SendroApplication
@@ -49,6 +50,7 @@ import com.sendro.android.ui.components.Pressable
 import com.sendro.android.ui.screens.DevicesScreen
 import com.sendro.android.ui.screens.FlightScreen
 import com.sendro.android.ui.screens.LibraryScreen
+import com.sendro.android.ui.screens.NotesScreen
 import com.sendro.android.ui.screens.PreviewRequest
 import com.sendro.android.ui.screens.PreviewScreen
 import com.sendro.android.ui.screens.ReceiveScreen
@@ -72,6 +74,7 @@ import kotlinx.coroutines.delay
 enum class SendroTab(val title: String) {
     RECEIVE("Receive"),
     SEND("Send"),
+    NOTES("Notes"),
     LIBRARY("Library"),
 }
 
@@ -102,6 +105,7 @@ fun RootScreen(
 
     val incoming by app.transferEngine.incoming.collectAsStateWithLifecycle()
     val messages by app.messages.inbox.collectAsStateWithLifecycle()
+    val notes by app.notes.notes.collectAsStateWithLifecycle()
     val pairedHosts by app.pairedHosts.hosts.collectAsStateWithLifecycle()
     val hostOnline by app.transferEngine.hostOnline.collectAsStateWithLifecycle()
 
@@ -181,6 +185,8 @@ fun RootScreen(
                         onOpenDevices = { overlay = Overlay.Devices },
                     )
 
+                    SendroTab.NOTES -> NotesScreen(app = app)
+
                     SendroTab.LIBRARY -> LibraryScreen(
                         app = app,
                         onPreview = { overlay = Overlay.Preview(it) },
@@ -195,8 +201,13 @@ fun RootScreen(
                 TabBar(
                     tab = tab,
                     onSelect = { tab = it },
-                    receiveDot = messages.isNotEmpty() ||
-                        (incoming.isNotEmpty() && tab != SendroTab.RECEIVE),
+                    receiveDot = incoming.isNotEmpty() && tab != SendroTab.RECEIVE,
+                    // The dot means "there is text you have not looked at",
+                    // which is exactly what an undismissed §11 card is. It
+                    // deliberately does NOT light for the shelf being
+                    // non-empty: a note lives 24 hours, so that would leave
+                    // the dot on all day.
+                    notesDot = messages.isNotEmpty() && tab != SendroTab.NOTES,
                     focusRequester = tabFocus,
                 )
             }
@@ -330,22 +341,24 @@ private fun TabBar(
     tab: SendroTab,
     onSelect: (SendroTab) -> Unit,
     receiveDot: Boolean,
+    notesDot: Boolean,
     focusRequester: FocusRequester? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            // One focus group: Left/Right walks the three tabs, and the group
+            // One focus group: Left/Right walks the four tabs, and the group
             // as a whole is what Up/Down enters and leaves.
             .focusGroup()
             .clip(RoundedCornerShape(24.dp))
             .background(Color.White.copy(alpha = 0.07f))
             .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
             .padding(5.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         TabButton(SendroTab.RECEIVE, tab, onSelect, Modifier.weight(1f), receiveDot, focusRequester)
         TabButton(SendroTab.SEND, tab, onSelect, Modifier.weight(1f), false, null)
+        TabButton(SendroTab.NOTES, tab, onSelect, Modifier.weight(1f), notesDot, null)
         TabButton(SendroTab.LIBRARY, tab, onSelect, Modifier.weight(1f), false, null)
     }
 }
@@ -377,9 +390,14 @@ private fun TabButton(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = target.title,
-                    style = Sendro.sans(12.5f, FontWeight.SemiBold),
+                    // Four tabs share the bar; on a narrow phone (and on TV,
+                    // where type scales up) "Library" is the one that runs
+                    // out of room, so it must ellipsize rather than clip
+                    // mid-glyph.
+                    style = Sendro.sans(11.5f, FontWeight.SemiBold),
                     color = if (selected) Sendro.textBase else Sendro.textBase.copy(alpha = 0.45f),
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 if (showDot) {
                     Box(

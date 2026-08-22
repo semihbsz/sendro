@@ -1,6 +1,6 @@
 [package]
 name = "sendro-desktop"
-version = "1.0.0"
+version = "1.0.1"
 description = "Sendro — private LAN file transfer for creators"
 authors = ["Sendro"]
 edition = "2021"

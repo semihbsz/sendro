@@ -16,6 +16,7 @@ struct SendroApp: App {
     @StateObject private var fileStore: FileStore
     @StateObject private var discovery: DiscoveryService
     @StateObject private var messages: MessageCenter
+    @StateObject private var notes: NoteStore
     @StateObject private var notifier: Notifier
     @StateObject private var network: NetworkWatcher
     @StateObject private var tray: SendTray
@@ -29,6 +30,9 @@ struct SendroApp: App {
         let fileStore = FileStore()
         let discovery = DiscoveryService()
         let messages = MessageCenter()
+        // The 24-hour local shelf for §11 text. Separate from MessageCenter
+        // on purpose: that one stays strictly in RAM.
+        let notes = NoteStore()
         // Owns the UNUserNotificationCenter delegate; must outlive every
         // notification, hence a StateObject rather than a local.
         let notifier = Notifier(settings: settings)
@@ -40,6 +44,7 @@ struct SendroApp: App {
                                     fileStore: fileStore,
                                     discovery: discovery,
                                     messages: messages,
+                                    notes: notes,
                                     notifier: notifier)
         let uploader = UploadEngine(paired: pairedHosts, history: history)
         _settings = StateObject(wrappedValue: settings)
@@ -48,6 +53,7 @@ struct SendroApp: App {
         _fileStore = StateObject(wrappedValue: fileStore)
         _discovery = StateObject(wrappedValue: discovery)
         _messages = StateObject(wrappedValue: messages)
+        _notes = StateObject(wrappedValue: notes)
         _notifier = StateObject(wrappedValue: notifier)
         _network = StateObject(wrappedValue: network)
         _tray = StateObject(wrappedValue: tray)
@@ -64,6 +70,7 @@ struct SendroApp: App {
                 .environmentObject(fileStore)
                 .environmentObject(discovery)
                 .environmentObject(messages)
+                .environmentObject(notes)
                 .environmentObject(notifier)
                 .environmentObject(network)
                 .environmentObject(tray)

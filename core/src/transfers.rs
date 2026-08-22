@@ -521,6 +521,48 @@ impl Core {
     // Download bookkeeping (used by the file handler)
     // ------------------------------------------------------------------
 
+    /// How long a file request will WAIT for a free streaming slot before it
+    /// gives up and answers `503`. Waiting instead of refusing is the whole
+    /// point: a client that asked for ten files at once must not be told
+    /// "no" for the eight that simply have not had their turn yet. Every
+    /// client also queues locally, so this ceiling is only ever reached when
+    /// something else (a second device, a Link guest) is holding the slots.
+    pub(crate) const SLOT_WAIT: Duration = Duration::from_secs(45);
+    /// Re-check interval while waiting. A freed slot also wakes waiters
+    /// immediately via `stream_slots`; this poll is the belt-and-braces half
+    /// so a missed notification can only ever cost a fraction of a second.
+    const SLOT_POLL: Duration = Duration::from_millis(200);
+
+    /// Reserve a streaming slot for `id`, waiting up to `max_wait` for one to
+    /// free up. Returns `false` only if the wait ran out — the caller then
+    /// answers `503` + `Retry-After`, which every Sendro client treats as
+    /// backpressure (never as a failure).
+    pub(crate) async fn acquire_stream_waiting(&self, id: Uuid, max_wait: Duration) -> bool {
+        if self.try_acquire_stream(id) {
+            return true;
+        }
+        let deadline = Instant::now() + max_wait;
+        loop {
+            // Register interest BEFORE re-testing, so a slot freed between
+            // the test and the await cannot be missed.
+            let woken = self.stream_slots.notified();
+            if self.try_acquire_stream(id) {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let _ = tokio::time::timeout(remaining.min(Self::SLOT_POLL), woken).await;
+            if self.try_acquire_stream(id) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+        }
+    }
+
     /// Try to reserve a streaming slot for `id`. At most `concurrency`
     /// distinct transfers may stream simultaneously; a reconnect on an
     /// already-active transfer is always allowed.
@@ -557,6 +599,10 @@ impl Core {
                 }
             }
         }
+        // A slot may have just freed up — wake everyone parked in
+        // `acquire_stream_waiting` so the next file starts immediately
+        // instead of after its next poll tick.
+        self.stream_slots.notify_waiters();
         if !completed {
             let mut changed = false;
             {

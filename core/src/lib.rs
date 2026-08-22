@@ -89,6 +89,9 @@ pub struct Core {
     pub(crate) paused: AtomicBool,
     /// transfer_id → number of currently open download streams for it.
     pub(crate) active_streams: Mutex<HashMap<Uuid, usize>>,
+    /// Poked whenever a download stream ends, so requests parked in
+    /// [`Core::acquire_stream_waiting`] can take the freed slot at once.
+    pub(crate) stream_slots: Notify,
 
     /// §11 ephemeral text, host → client. Per-device in-memory inbox, capped
     /// at [`messages::MAX_INBOX`], drained on outbox read. NEVER persisted.
@@ -201,6 +204,7 @@ impl Core {
             outbox_notify: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
             active_streams: Mutex::new(HashMap::new()),
+            stream_slots: Notify::new(),
             message_inbox: RwLock::new(HashMap::new()),
             incoming: RwLock::new(VecDeque::new()),
             link: RwLock::new(None),

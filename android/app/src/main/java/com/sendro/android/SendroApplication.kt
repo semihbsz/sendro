@@ -12,6 +12,7 @@ import com.sendro.android.core.HistoryStore
 import com.sendro.android.core.MediaSaver
 import com.sendro.android.core.MessageCenter
 import com.sendro.android.core.NetworkWatcher
+import com.sendro.android.core.NoteStore
 import com.sendro.android.core.Notifier
 import com.sendro.android.core.PairedHostStore
 import com.sendro.android.core.SendTray
@@ -56,6 +57,7 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
     lateinit var pairedHosts: PairedHostStore private set
     lateinit var history: HistoryStore private set
     lateinit var messages: MessageCenter private set
+    lateinit var notes: NoteStore private set
     lateinit var notifier: Notifier private set
     lateinit var networkWatcher: NetworkWatcher private set
     lateinit var discovery: Discovery private set
@@ -92,6 +94,9 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
         pairedHosts = PairedHostStore(this)
         history = HistoryStore(paths.historyFile)
         messages = MessageCenter()
+        // The 24-hour local shelf for §11 text. Separate from MessageCenter
+        // on purpose: that one stays strictly in RAM.
+        notes = NoteStore(paths.notesFile)
         notifier = Notifier(this, settings)
         networkWatcher = NetworkWatcher(this)
         discovery = Discovery(this, appScope)
@@ -108,6 +113,7 @@ class SendroApplication : Application(), coil.ImageLoaderFactory {
             paths = paths,
             mediaSaver = mediaSaver,
             messages = messages,
+            notes = notes,
             notifier = notifier,
             onTransferActivity = ::syncForegroundService,
         )

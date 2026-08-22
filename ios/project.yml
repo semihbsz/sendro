@@ -15,7 +15,7 @@ settings:
     # URLSession delegates & Combine sinks are used from non-main queues on
     # purpose; keep concurrency checking minimal to match Swift 5 semantics.
     SWIFT_STRICT_CONCURRENCY: minimal
-    MARKETING_VERSION: "1.0.0"
+    MARKETING_VERSION: "1.0.1"
     CURRENT_PROJECT_VERSION: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
 

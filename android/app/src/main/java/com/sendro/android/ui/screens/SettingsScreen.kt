@@ -188,8 +188,9 @@ fun SettingsScreen(app: SendroApplication, onClose: () -> Unit) {
             item {
                 ToggleRow(
                     title = "Auto-accept from trusted devices",
-                    subtitle = "Only applies to offers your PC marked auto-send. " +
-                        "Everything else still asks.",
+                    subtitle = "Files from a computer you paired with start " +
+                        "downloading straight away, with no prompt. Turn it off " +
+                        "and every file asks first.",
                     checked = settings.autoAcceptFromTrusted,
                     onChange = { scope.launch { app.settings.setAutoAccept(it) } },
                 )

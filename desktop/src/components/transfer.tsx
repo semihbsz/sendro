@@ -51,16 +51,32 @@ export function PhasePill({
 
 /* ---------- Ring progress ---------- */
 
-/** 0..1 data fraction for the accent ring. */
+/** 0..1 data fraction for the accent ring.
+ *
+ *  The ring reports *bytes actually moved*, so it can never contradict the
+ *  "moved" figure next to it. In particular a failed or interrupted transfer
+ *  shows how far it really got — a red row sitting at a confident 100% was
+ *  the single most misleading thing in the old flight list. Only a finished
+ *  transfer is allowed to read full. */
 export function ringFraction(t: TransferSummary): number {
+  const moved = formatPercent(t.bytesTransferred, t.sizeBytes) / 100;
   switch (t.state) {
     case "queued":
     case "hashing":
+      return 0;
+    // A re-offered or resumed transfer keeps the bytes it already moved.
     case "offered":
     case "accepted":
-      return 0;
     case "transferring":
-      return formatPercent(t.bytesTransferred, t.sizeBytes) / 100;
+    case "interrupted":
+    case "failed":
+      return moved;
+    // Nothing was delivered, and nothing will be.
+    case "rejected":
+    case "cancelled":
+    case "expired":
+      return 0;
+    // verifying / saving / completed — all bytes are across.
     default:
       return 1;
   }

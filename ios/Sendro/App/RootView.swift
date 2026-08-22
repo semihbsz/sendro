@@ -2,7 +2,7 @@
 //  RootView.swift
 //  Sendro
 //
-//  New shell: three peer surfaces — Receive · Send · Library — behind a
+//  New shell: four surfaces — Receive · Send · Notes · Library — behind a
 //  floating glass tab bar, plus the Devices sheet (discovery / pairing /
 //  manual connect), the Settings sheet, the full-screen Flight view for a
 //  live transfer, and the ephemeral message card stack that floats over
@@ -26,12 +26,14 @@ struct RootView: View {
     enum Tab {
         case receive
         case send
+        case notes
         case library
     }
 
     @EnvironmentObject private var engine: TransferEngine
     @EnvironmentObject private var discovery: DiscoveryService
     @EnvironmentObject private var messages: MessageCenter
+    @EnvironmentObject private var notes: NoteStore
     @EnvironmentObject private var pairedHosts: PairedHostStore
     @EnvironmentObject private var notifier: Notifier
     @EnvironmentObject private var network: NetworkWatcher
@@ -64,6 +66,8 @@ struct RootView: View {
                 case .send:
                     SendView(targetHostId: $sendTargetId,
                              openDevices: { showDevices = true })
+                case .notes:
+                    NotesView()
                 case .library:
                     LibraryView()
                 }
@@ -129,6 +133,10 @@ struct RootView: View {
                 // immediately (fresh ping per host) so paired computers show
                 // connected within a couple of seconds of returning.
                 engine.applicationDidBecomeActive()
+                // Anything that expired while we were suspended goes now,
+                // not when the shelf happens to be opened.
+                notes.prune()
+                notes.startPruning()
                 if discovery.status != .browsing {
                     discovery.start()
                 }
@@ -220,6 +228,9 @@ struct RootView: View {
             switch tab {
             case .receive: surface = .receive
             case .send:    surface = .send
+            // The shelf is a reading surface; for notification purposes it
+            // behaves like the library (nothing live is happening on it).
+            case .notes:   surface = .library
             case .library: surface = .library
             }
         }
@@ -228,16 +239,23 @@ struct RootView: View {
 
     // MARK: Floating glass tab bar
 
-    /// Three tabs have to fit inside 320pt: 20pt page margins, 5pt inner
-    /// padding and 6pt gaps leave ~86pt per tab, and the labels below (14pt
-    /// glyph + 6pt + a ≤52pt caption) come in well under that. The pending
-    /// badge is an overlay on the glyph, so it costs no width.
+    /// Four tabs have to fit the narrowest iPhone (320pt): 20pt page
+    /// margins, 5pt inner padding and three 5pt gaps leave ~61pt per tab.
+    /// That is too narrow for a glyph beside a word, so the caption sits
+    /// UNDER the glyph — 15pt glyph + 3pt + an 11pt caption is comfortable
+    /// in 61pt and still reads at a glance. The pending badge is an overlay
+    /// on the glyph, so it costs no width.
     private var tabBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             tabButton(.receive, title: "Receive", systemImage: "tray.and.arrow.down",
-                      showsDot: messages.hasMessages
-                                || (!engine.incomingOffers.isEmpty && tab != .receive))
+                      showsDot: !engine.incomingOffers.isEmpty && tab != .receive)
             tabButton(.send, title: "Send", systemImage: "paperplane")
+            // The dot means "there is text you have not looked at", which is
+            // exactly what an undismissed §11 card is. It deliberately does
+            // NOT light for the shelf being non-empty: a note lives 24 hours,
+            // so that would leave the dot on all day.
+            tabButton(.notes, title: "Notes", systemImage: "note.text",
+                      showsDot: messages.hasMessages && tab != .notes)
             tabButton(.library, title: "Library", systemImage: "folder")
         }
         .padding(5)
@@ -260,25 +278,25 @@ struct RootView: View {
         return Button {
             withAnimation(.easeOut(duration: 0.2)) { tab = target }
         } label: {
-            HStack(spacing: 6) {
+            VStack(spacing: 3) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .overlay(alignment: .topTrailing) {
                         if showsDot {
                             Circle()
                                 .fill(Theme.iris)
                                 .frame(width: 6, height: 6)
-                                .offset(x: 4, y: -3)
+                                .offset(x: 5, y: -3)
                         }
                     }
                 Text(title)
-                    .font(Theme.sans(12.5, .semibold))
+                    .font(Theme.sans(10.5, .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
             .foregroundColor(selected ? Theme.textBase : Theme.textBase.opacity(0.45))
             .frame(maxWidth: .infinity)
-            .frame(height: 46)
+            .frame(height: 50)
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(selected ? Color.white.opacity(0.12) : Color.clear)

@@ -145,7 +145,10 @@ async fn pause_gate_holds_outbox_and_downloads() {
 }
 
 #[tokio::test]
-async fn concurrency_gate_returns_503_with_retry_after() {
+async fn concurrency_gate_queues_instead_of_refusing() {
+    // A busy slot must never turn into a failed transfer. The second
+    // request is HELD until the first stream finishes, then served — no
+    // 503, no retry loop on the client, no "Host returned HTTP 503".
     let ctx = common::start_core_with(|cfg| cfg.concurrency = 1).await;
     let (device_id, token) = pair_device(&ctx).await;
 
@@ -182,41 +185,38 @@ async fn concurrency_gate_returns_503_with_retry_after() {
     let mut stream_a = resp_a.bytes_stream();
     let _first_chunk = stream_a.next().await.unwrap().unwrap();
 
-    // B is refused while A occupies the single slot.
-    let resp_b = ctx
-        .client
-        .get(ctx.url(&format!("/api/v1/transfers/{id_b}/file")))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_b.status(), 503);
-    assert_eq!(resp_b.headers().get("retry-after").unwrap(), "2");
+    // Ask for B while A holds the only slot. The request is parked, not
+    // refused — so it must still be in flight a moment later.
+    let client_b = ctx.client.clone();
+    let url_b = ctx.url(&format!("/api/v1/transfers/{id_b}/file"));
+    let token_b = token.clone();
+    let pending_b = tokio::spawn(async move {
+        client_b
+            .get(url_b)
+            .bearer_auth(&token_b)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !pending_b.is_finished(),
+        "B must wait for a slot, not be turned away with 503"
+    );
 
-    // Drain A completely → slot free → B succeeds.
+    // Drain A completely → slot frees → B is served without ever seeing an
+    // error status.
     while let Some(chunk) = stream_a.next().await {
         chunk.unwrap();
     }
-    // The slot is released when the server-side stream finishes; allow a
-    // brief moment for that.
-    let mut ok = false;
-    for _ in 0..50 {
-        let resp_b = ctx
-            .client
-            .get(ctx.url(&format!("/api/v1/transfers/{id_b}/file")))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .unwrap();
-        if resp_b.status() == 200 {
-            let body = resp_b.bytes().await.unwrap();
-            assert_eq!(body.len(), 64 * 1024);
-            ok = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(ok, "transfer B should proceed after A finished");
+    let resp_b = tokio::time::timeout(Duration::from_secs(20), pending_b)
+        .await
+        .expect("B should be served once the slot frees")
+        .unwrap();
+    assert_eq!(resp_b.status(), 200);
+    let body = resp_b.bytes().await.unwrap();
+    assert_eq!(body.len(), 64 * 1024);
+
     ctx.core.shutdown().await;
 }
 

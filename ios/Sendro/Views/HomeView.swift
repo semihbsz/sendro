@@ -317,8 +317,30 @@ struct HomeView: View {
 
     private var activeSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionTag(text: "In flight")
-                .padding(.leading, 2)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                SectionTag(text: "In flight")
+                    .padding(.leading, 2)
+                Spacer(minLength: 0)
+                // Clearing failures one row at a time is busywork when a
+                // whole batch went red together.
+                let failedCount = engine.failedTransferIds.count
+                if failedCount > 0 {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) { engine.clearFailed() }
+                    } label: {
+                        Text(failedCount == 1
+                             ? "Clear failed"
+                             : "Clear \(failedCount) failed")
+                            .font(Theme.sans(11.5, .medium))
+                            .foregroundColor(Theme.danger.opacity(0.9))
+                            .lineLimit(1)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Theme.danger.opacity(0.12)))
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
+            }
 
             VStack(spacing: 8) {
                 ForEach(engine.active) { transfer in

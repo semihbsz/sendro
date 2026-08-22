@@ -164,6 +164,8 @@ class TransferEngine(
     private val paths: AppPaths,
     private val mediaSaver: MediaSaver,
     private val messages: MessageCenter,
+    /** The 24-hour local shelf (§11.3); MessageCenter stays RAM-only. */
+    private val notes: NoteStore,
     private val notifier: Notifier,
     private val onTransferActivity: () -> Unit,
 ) {
@@ -210,6 +212,9 @@ class TransferEngine(
 
         /** How often every paired host's poll loop is checked for liveness. */
         private const val POLL_WATCHDOG_MS = 30_000L
+
+        /** Shortest gap between two re-accepts of the same host-retried transfer. */
+        private const val REACCEPT_COOLDOWN_MS = 10_000L
     }
 
     private val _incoming = MutableStateFlow<List<IncomingOffer>>(emptyList())
@@ -245,6 +250,9 @@ class TransferEngine(
 
     /** transferId -> how many times a 416 has made us start over. */
     private val rangeRestarts = HashMap<String, Int>()
+
+    /** transferId -> when we last re-accepted it after a host-side Retry. */
+    private val lastReaccept = HashMap<String, Long>()
 
     /** The pump is a single logical worker; these two make it re-entrant-safe. */
     private var pumping = false
@@ -498,6 +506,9 @@ class TransferEngine(
         val client = clientFor(hostId) ?: return "That computer is not reachable right now."
         return try {
             client.sendMessage(text)
+            // Kept locally for 24 h (§11.3). Only on success: an unsent
+            // message must not look like it went anywhere.
+            notes.addOutgoing(text, paired.host(hostId)?.name ?: "your PC")
             null
         } catch (e: CancellationException) {
             throw e
@@ -520,14 +531,23 @@ class TransferEngine(
         paths.stagedFile(transferId, transfer.offer.fileName).delete()
         removeRecord(transferId)
         forgetQueueState(transferId)
+        synchronized(stateLock) { lastReaccept.remove(transferId) }
         _active.update { list -> list.filterNot { it.id == transferId } }
-        reportStatus(transfer.hostId, transferId, StatusReport(TransferState.CANCELLED))
+        // Dismissing a row that ALREADY failed is not a cancellation. The
+        // host has known it failed since the status report went out, and
+        // history has to say what actually happened — otherwise clearing a
+        // batch of red rows rewrites them all as "cancelled".
+        val failure = transfer.phase as? TransferPhase.Failed
+        if (failure == null) {
+            reportStatus(transfer.hostId, transferId, StatusReport(TransferState.CANCELLED))
+        }
         history.add(
             transferId = transferId,
             fileName = transfer.offer.fileName,
             sizeBytes = transfer.offer.sizeBytes,
             senderName = transfer.offer.senderName,
-            outcome = "cancelled",
+            outcome = if (failure != null) "failed" else "cancelled",
+            errorMessage = failure?.message,
         )
         onTransferActivity()
     }
@@ -717,6 +737,10 @@ class TransferEngine(
                 // names the sender and nothing else.
                 if (response.messages.isNotEmpty()) {
                     messages.receive(response.messages)
+                    // §11.3 — the card is still the ephemeral thing; this is
+                    // the local 24-hour copy so the text can be read again
+                    // after it is dismissed.
+                    notes.addIncoming(response.messages)
                     val from = response.messages.lastOrNull()?.senderName
                         ?.takeIf { it.isNotBlank() }
                         ?: senderName
@@ -775,14 +799,29 @@ class TransferEngine(
      */
     private fun handleOffer(offer: TransferOffer, hostId: String): Boolean {
         val id = offer.transferId
+
+        // Already on screen as a transfer? Then this is not a new offer, it
+        // is the host re-publishing one we know about — which happens for
+        // exactly one reason: Retry was pressed on the PC, putting the
+        // transfer back into Offered. Falling through the guards below did
+        // nothing, which is why Retry looked broken. Consent was given once.
+        val existing = _active.value.firstOrNull { it.id == id }
+        if (existing != null) {
+            when (existing.phase) {
+                is TransferPhase.Failed, TransferPhase.Interrupted ->
+                    reacceptAfterHostRetry(offer, hostId)
+                else -> Unit
+            }
+            return false
+        }
+
         synchronized(stateLock) {
             // §6.2: re-delivery is idempotent, the client dedupes by transferId.
             if (id in processedOfferIds) return false
         }
         if (_incoming.value.any { it.id == id }) return false
-        if (_active.value.any { it.id == id }) return false
 
-        if (offer.autoAccept && settings.current.autoAcceptFromTrusted) {
+        if (autoAcceptAllowed(hostId)) {
             synchronized(stateLock) { processedOfferIds.add(id) }
             scope.launch { acceptAndStart(offer, hostId) }
             return false
@@ -795,6 +834,73 @@ class TransferEngine(
             )
         }
         return true
+    }
+
+    /**
+     * "Accept automatically from trusted devices" is the RECEIVER'S choice,
+     * and here "trusted" means one thing: a computer this phone deliberately
+     * paired with and has not forgotten. Every host we long-poll is one of
+     * those, so the setting alone decides.
+     *
+     * It used to also require the sender to have flagged the offer
+     * `autoAccept`, which only happens for watch-folder files — so the
+     * toggle appeared to do nothing for hand-picked files, which is exactly
+     * the case people turn it on for.
+     */
+    private fun autoAcceptAllowed(hostId: String): Boolean {
+        if (!settings.current.autoAcceptFromTrusted) return false
+        return paired.host(hostId) != null
+    }
+
+    /**
+     * The host re-offered something we already have a failed or paused row
+     * for. Its state there is Offered again, so a bare ranged GET would be
+     * refused with 409 — it has to be accepted once more first. The partial
+     * file is left untouched, so this resumes from exactly where it stopped.
+     *
+     * Rate-limited: the outbox republishes an Offered transfer on every
+     * poll, and a poll returns immediately while anything is pending, so
+     * without the cooldown a transfer we keep failing to accept would spin.
+     */
+    private fun reacceptAfterHostRetry(offer: TransferOffer, hostId: String) {
+        val transferId = offer.transferId
+        val now = System.currentTimeMillis()
+        synchronized(stateLock) {
+            val last = lastReaccept[transferId] ?: 0L
+            if (now - last < REACCEPT_COOLDOWN_MS) return
+        }
+        // Only this transfer's backoff. A host-wide cooldown means the PC
+        // told us it is busy, and a re-offer is not evidence that it stopped
+        // being busy — clearing it here would reset the backoff for every
+        // other file queued behind it.
+        //
+        // `lastReaccept` is deliberately NOT part of forgetQueueState: that
+        // runs on every terminal outcome, and dropping the stamp there would
+        // let a transfer the host keeps re-offering, and we keep failing to
+        // accept, re-accept on every single poll.
+        forgetQueueState(transferId)
+        synchronized(stateLock) { lastReaccept[transferId] = now }
+        setPhase(transferId, TransferPhase.Preparing)
+        // Drop the stale acceptance record; acceptAndStart re-adds it once
+        // the host has accepted this round.
+        removeRecord(transferId)
+        scope.launch { acceptAndStart(offer, hostId) }
+    }
+
+    /**
+     * Ids of every row that ended in failure — what a "Clear failed" control
+     * sweeps away.
+     */
+    fun failedTransferIds(): List<String> =
+        _active.value.filter { it.phase is TransferPhase.Failed }.map { it.id }
+
+    /**
+     * Dismiss every failed transfer at once instead of making the user tap
+     * Remove on each row. Each goes through the same [cancel] path a single
+     * Remove uses, so nothing is left behind.
+     */
+    fun clearFailed() {
+        for (id in failedTransferIds()) cancel(id)
     }
 
     private fun resumeInterrupted(hostId: String) {
@@ -1557,6 +1663,7 @@ class TransferEngine(
             mediaUri = mediaUri,
         )
         removeRecord(offer.transferId)
+        synchronized(stateLock) { lastReaccept.remove(offer.transferId) }
         _active.update { list -> list.filterNot { it.id == offer.transferId } }
         notifier.notifyTransferFinished(offer.transferId, offer.fileName, savedTo)
         onTransferActivity()

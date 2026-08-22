@@ -78,8 +78,8 @@ android {
         // Keep the literal form (no interpolation, no helper function) or the
         // release will fail its version-drift check.
         // ---------------------------------------------------------------
-        versionName = "1.0.0"
-        versionCode = 10000
+        versionName = "1.0.1"
+        versionCode = 10001
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -37,6 +37,9 @@ class AppPaths(private val context: Context) {
         File(incoming, "$transferId-${FileNames.sanitize(fileName)}")
 
     val inFlightStateFile: File get() = File(state, "inflight.json")
+
+    /** §11.3 — the 24-hour notes shelf. App-private; expires on its own. */
+    val notesFile: File get() = File(state, "notes.json")
     val historyFile: File get() = File(state, "history.json")
 
     /** A fresh subdirectory for one picker/share batch. */

@@ -243,7 +243,32 @@ fun ReceiveScreen(
             }
 
             if (active.isNotEmpty()) {
-                item { SectionTag("In flight", Sendro.textFaint, Modifier.padding(top = 14.dp)) }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SectionTag("In flight", Sendro.textFaint)
+                        Spacer(Modifier.weight(1f))
+                        // Clearing failures one row at a time is busywork when
+                        // a whole batch went red together.
+                        val failedCount = active.count { it.phase is TransferPhase.Failed }
+                        if (failedCount > 0) {
+                            Pressable(onClick = { app.transferEngine.clearFailed() }) {
+                                Text(
+                                    text = if (failedCount == 1) {
+                                        "Clear failed"
+                                    } else {
+                                        "Clear $failedCount failed"
+                                    },
+                                    style = Sendro.sans(11.5f, FontWeight.Medium),
+                                    color = Sendro.danger.copy(alpha = 0.9f),
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
+                }
                 items(active, key = { it.id }) { transfer ->
                     ActiveRow(transfer = transfer, onClick = { onOpenFlight(transfer.id) })
                 }

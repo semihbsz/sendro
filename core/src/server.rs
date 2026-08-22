@@ -519,9 +519,18 @@ async fn download_file(
         )
     };
 
-    // Concurrency gate: at most `concurrency` transfers streaming at once.
-    // The iOS client retries on 503 + Retry-After.
-    if !core.try_acquire_stream(id) {
+    // Concurrency gate: at most `concurrency` transfers stream at once.
+    //
+    // A busy gate is NOT a refusal. Sending ten files at once is the normal
+    // case, so a request that arrives while both slots are taken WAITS for
+    // its turn (up to `Core::SLOT_WAIT`) and is then served like any other.
+    // Only if the wait genuinely runs out do we answer 503 + Retry-After —
+    // which every Sendro client treats as "come back shortly", never as a
+    // failed transfer.
+    if !core
+        .acquire_stream_waiting(id, Core::SLOT_WAIT)
+        .await
+    {
         let mut resp = api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "rate_limited",

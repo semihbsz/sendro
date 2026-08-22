@@ -137,6 +137,9 @@ final class TransferEngine: ObservableObject {
     private let discovery: DiscoveryService
     /// In-RAM only (§11). The engine never persists anything it routes here.
     private let messages: MessageCenter
+    /// The 24-hour local shelf (§11.3). A copy of the same text, kept on
+    /// this iPhone only — see NoteStore for the rules.
+    private let notes: NoteStore
     /// Local notifications (best-effort, foreground/briefly-backgrounded).
     private let notifier: Notifier
 
@@ -145,6 +148,8 @@ final class TransferEngine: ObservableObject {
     private var downloads: [String: DownloadTask] = [:]
     private var processedOfferIds: Set<String> = []
     private var autoResumed: Set<String> = []
+    /// transferId → when we last re-accepted it after a host-side Retry.
+    private var lastReaccept: [String: Date] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private var started = false
 
@@ -190,6 +195,7 @@ final class TransferEngine: ObservableObject {
                      fileStore: FileStore,
                      discovery: DiscoveryService,
                      messages: MessageCenter,
+                     notes: NoteStore,
                      notifier: Notifier) {
         self.settings = settings
         self.paired = paired
@@ -197,6 +203,7 @@ final class TransferEngine: ObservableObject {
         self.fileStore = fileStore
         self.discovery = discovery
         self.messages = messages
+        self.notes = notes
         self.notifier = notifier
     }
 
@@ -492,6 +499,9 @@ final class TransferEngine: ObservableObject {
         }
         do {
             try await client.sendMessage(text: text)
+            // Kept locally for 24 h (§11.3). Only on success: an unsent
+            // message must not look like it went anywhere.
+            notes.addOutgoing(text, peerName: paired.host(id: hostId)?.name ?? "your PC")
             return nil
         } catch {
             return error.localizedDescription
@@ -508,6 +518,7 @@ final class TransferEngine: ObservableObject {
         backpressureSince[transferId] = nil
         transferBusyUntil[transferId] = nil
         transferBusyReason[transferId] = nil
+        lastReaccept[transferId] = nil
 
         if let download = downloads[transferId] {
             download.cancel()            // outcome .cancelled flows through handleOutcome
@@ -527,14 +538,47 @@ final class TransferEngine: ObservableObject {
         LiveActivityController.shared.end(transferId: transferId,
                                           phase: .failed,
                                           bytesReceived: transfer.bytesReceived)
-        sendStatus(transfer.hostId, transferId, StatusReport(state: "cancelled"))
-        history.add(transferId: transferId,
-                    fileName: transfer.offer.fileName,
-                    sizeBytes: transfer.offer.sizeBytes,
-                    senderName: transfer.offer.senderName,
-                    outcome: "cancelled")
+        // Dismissing a row that ALREADY failed is not a cancellation. The
+        // host has known it failed since the status report went out, and the
+        // history entry has to say what actually happened — otherwise
+        // clearing a batch of red rows rewrites them all as "cancelled".
+        if case .failed(let message, _) = transfer.phase {
+            history.add(transferId: transferId,
+                        fileName: transfer.offer.fileName,
+                        sizeBytes: transfer.offer.sizeBytes,
+                        senderName: transfer.offer.senderName,
+                        outcome: "failed",
+                        errorMessage: message)
+        } else {
+            sendStatus(transfer.hostId, transferId, StatusReport(state: "cancelled"))
+            history.add(transferId: transferId,
+                        fileName: transfer.offer.fileName,
+                        sizeBytes: transfer.offer.sizeBytes,
+                        senderName: transfer.offer.senderName,
+                        outcome: "cancelled")
+        }
         updateIdleTimer()
         pumpQueue()
+    }
+
+    /// Ids of every row that ended in failure — the ones a "Clear failed"
+    /// control should sweep away.
+    var failedTransferIds: [String] {
+        active.filter {
+            if case .failed = $0.phase { return true }
+            return false
+        }.map(\.id)
+    }
+
+    /// Dismiss every failed transfer in one action, instead of making the
+    /// user tap Remove on each row. Each goes through the same `cancel`
+    /// path a single Remove uses, so the partial file, the acceptance
+    /// record, the Live Activity and the host's own view of the transfer
+    /// all end up in exactly the state they would have one at a time.
+    func clearFailed() {
+        for id in failedTransferIds {
+            cancel(transferId: id)
+        }
     }
 
     /// Resume / retry / "try now". Every one of these goes back through the
@@ -872,6 +916,10 @@ final class TransferEngine: ObservableObject {
                 // never touched again by this loop.
                 if let delivered = response.messages, !delivered.isEmpty {
                     messages.receive(delivered)
+                    // §11.3 — the card is still the ephemeral thing; this is
+                    // the local 24-hour copy so the text can be read again
+                    // after it is dismissed.
+                    notes.addIncoming(delivered)
                     if let newest = delivered.last {
                         // Privacy: only the sender's name leaves this line.
                         notifier.notifyMessage(senderName: newest.senderName)
@@ -909,17 +957,84 @@ final class TransferEngine: ObservableObject {
     @discardableResult
     private func handleOffer(_ offer: TransferOffer, hostId: String) -> Bool {
         let id = offer.transferId
-        guard !processedOfferIds.contains(id),
-              !incomingOffers.contains(where: { $0.id == id }),
-              !active.contains(where: { $0.id == id }) else { return false }
 
-        if offer.autoAccept && settings.autoAcceptFromTrusted {
+        // Already on screen as a transfer? Then this is not a new offer —
+        // it is the host re-publishing one we know about. That happens for
+        // exactly one reason: someone pressed Retry on the PC, which puts
+        // the transfer back into `Offered` (core: retry_transfer). The old
+        // code fell through the "already seen" guard below and did nothing,
+        // which is why Retry on the PC looked broken. Consent was given
+        // once; pick the transfer back up instead of asking again.
+        if let existing = active.first(where: { $0.id == id }) {
+            switch existing.phase {
+            case .failed, .interrupted:
+                reacceptAfterHostRetry(offer: offer, hostId: hostId)
+            default:
+                break       // running, queued, waiting or awaiting a choice
+            }
+            return false
+        }
+
+        guard !processedOfferIds.contains(id),
+              !incomingOffers.contains(where: { $0.id == id }) else { return false }
+
+        if autoAcceptAllowed(hostId: hostId) {
             processedOfferIds.insert(id)
             Task { await self.acceptAndStart(offer: offer, hostId: hostId) }
             return false
         }
         incomingOffers.append(IncomingOffer(offer: offer, hostId: hostId, receivedAt: Date()))
         return true
+    }
+
+    /// "Accept automatically from trusted devices" is the RECEIVER'S choice,
+    /// and on this iPhone "trusted" means exactly one thing: a computer the
+    /// user deliberately paired with and has not forgotten. Every host we
+    /// long-poll is one of those, so the setting alone decides.
+    ///
+    /// It used to also require the sender to have marked the offer
+    /// `autoAccept`, which only ever happens for watch-folder files — so the
+    /// toggle appeared to do nothing for hand-picked files, which is the
+    /// case people actually turn it on for.
+    private func autoAcceptAllowed(hostId: String) -> Bool {
+        guard settings.autoAcceptFromTrusted else { return false }
+        return paired.host(id: hostId) != nil
+    }
+
+    /// Shortest gap between two re-accepts of the same transfer. The outbox
+    /// republishes an `Offered` transfer on every poll, and a poll returns
+    /// immediately while anything is pending — without this, a transfer the
+    /// host keeps re-offering and we keep failing to accept would spin.
+    private static let reacceptCooldown: TimeInterval = 10
+
+    /// The host re-offered something we already have a (failed or paused)
+    /// row for. Its state there is `Offered` again, so a bare ranged GET
+    /// would be refused with 409 — we have to accept it once more before
+    /// downloading. The partial file on disk is left alone, so this resumes
+    /// from exactly where it stopped.
+    private func reacceptAfterHostRetry(offer: TransferOffer, hostId: String) {
+        let transferId = offer.transferId
+        if let last = lastReaccept[transferId],
+           Date().timeIntervalSince(last) < Self.reacceptCooldown {
+            return
+        }
+        lastReaccept[transferId] = Date()
+
+        queue.removeAll { $0 == transferId }
+        backpressureAttempts[transferId] = nil
+        backpressureSince[transferId] = nil
+        // Only this transfer's backoff. A host-wide cooldown means the PC
+        // told us it is busy, and a re-offer is not evidence that it stopped
+        // being busy — clearing it here would reset the backoff for every
+        // other file queued behind it.
+        transferBusyUntil[transferId] = nil
+        transferBusyReason[transferId] = nil
+        setNote(transferId, nil)
+        setPhase(transferId, .preparing)
+        // Drop the stale acceptance record: acceptAndStart re-adds it once
+        // the host has actually accepted this round.
+        removeRecord(transferId)
+        Task { await self.acceptAndStart(offer: offer, hostId: hostId) }
     }
 
     private func resumeInterrupted(hostId: String) {
@@ -1404,6 +1519,7 @@ final class TransferEngine: ObservableObject {
                     photoAssetId: photoAssetId)
         removeRecord(offer.transferId)
         active.removeAll { $0.id == offer.transferId }
+        lastReaccept[offer.transferId] = nil
         LiveActivityController.shared.end(transferId: offer.transferId,
                                           phase: .completed,
                                           bytesReceived: offer.sizeBytes)
